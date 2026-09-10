@@ -20,7 +20,12 @@ from mb_config import (
     DISCOVERY_RX_BUFFER_LIMIT,
     MODBUS_EXCEPTION_CODES,
 )
-from mb_protocol import append_crc, crc_ok, hex_bytes
+from mb_protocol import (
+    append_crc,
+    crc_ok,
+    hex_bytes,
+    modbus_rtu_interframe_gap_seconds,
+)
 from mb_widgets import RefreshButton
 
 def build_discovery_probe(slave: int, fc: int) -> bytes:
@@ -37,6 +42,259 @@ def build_discovery_probe(slave: int, fc: int) -> bytes:
         0x00, DISCOVERY_PROBE_QTY & 0xFF,
     ))
     return append_crc(payload)
+
+DEVICE_ID_FC = 0x2B
+DEVICE_ID_MEI_TYPE = 0x0E
+DEVICE_ID_READ_BASIC = 0x01
+DEVICE_ID_MORE_FOLLOWS = 0xFF
+DEVICE_ID_BASIC_OBJECTS = (0x00, 0x01, 0x02)
+DEVICE_ID_MAX_PAGES = 8
+
+def build_device_identification_probe(slave: int, object_id: int = 0x00) -> bytes:
+    """Build FC43/MEI 14 Basic Device Identification request."""
+    slave = int(slave)
+    object_id = int(object_id)
+    if not (1 <= slave <= 247):
+        raise ValueError("Slave ID fora do intervalo 1..247")
+    if not (0 <= object_id <= 0xFF):
+        raise ValueError("Object ID fora do intervalo 0..255")
+    return append_crc(bytes((
+        slave,
+        DEVICE_ID_FC,
+        DEVICE_ID_MEI_TYPE,
+        DEVICE_ID_READ_BASIC,
+        object_id,
+    )))
+
+def _decode_device_id_value(value: bytes) -> str:
+    """Decode a Modbus Device Identification ASCII object for display."""
+    return bytes(value).decode("ascii", errors="replace").strip("\x00 ")
+
+def find_device_identification_response(buffer: bytes, slave: int):
+    """Find one CRC-valid FC43/14 response or Modbus exception in *buffer*."""
+    data = bytes(buffer)
+    slave = int(slave)
+
+    for offset in range(max(0, len(data) - 3)):
+        if data[offset] != slave or offset + 2 > len(data):
+            continue
+
+        response_fc = data[offset + 1]
+
+        # FC43 exception response: Slave + 0xAB + Exception + CRC.
+        if response_fc == (DEVICE_ID_FC | 0x80):
+            end = offset + 5
+            if end <= len(data):
+                frame = data[offset:end]
+                if crc_ok(frame):
+                    return {
+                        "kind": "EXCEPTION",
+                        "frame": frame,
+                        "exception_code": frame[2],
+                        "objects": {},
+                        "more_follows": False,
+                        "next_object_id": 0,
+                    }
+            continue
+
+        if response_fc != DEVICE_ID_FC:
+            continue
+
+        # Normal response fixed header before the object list:
+        # Slave, FC, MEI, ReadCode, Conformity, MoreFollows, NextObject, Count.
+        if offset + 8 > len(data):
+            continue
+        if data[offset + 2] != DEVICE_ID_MEI_TYPE:
+            continue
+        if data[offset + 3] != DEVICE_ID_READ_BASIC:
+            continue
+
+        more_follows = data[offset + 5] == DEVICE_ID_MORE_FOLLOWS
+        next_object_id = data[offset + 6]
+        object_count = data[offset + 7]
+        pos = offset + 8
+        objects = {}
+        complete = True
+
+        for _ in range(object_count):
+            if pos + 2 > len(data):
+                complete = False
+                break
+            object_id = data[pos]
+            object_len = data[pos + 1]
+            pos += 2
+            if pos + object_len > len(data):
+                complete = False
+                break
+            objects[object_id] = _decode_device_id_value(
+                data[pos:pos + object_len]
+            )
+            pos += object_len
+
+        if not complete:
+            continue
+
+        end = pos + 2
+        if end > len(data):
+            continue
+        frame = data[offset:end]
+        if not crc_ok(frame):
+            continue
+
+        return {
+            "kind": "DEVICE_ID",
+            "frame": frame,
+            "exception_code": None,
+            "objects": objects,
+            "more_follows": more_follows,
+            "next_object_id": next_object_id,
+            "conformity_level": data[offset + 4],
+        }
+
+    return None
+
+def read_device_identification_response(ser, slave, timeout_s, stop_event):
+    """Read until a valid FC43/14 response/exception is received or timed out."""
+    deadline = time.perf_counter() + max(0.001, float(timeout_s))
+    buffer = bytearray()
+
+    while time.perf_counter() < deadline:
+        if stop_event.is_set():
+            return None
+
+        waiting = int(getattr(ser, "in_waiting", 0) or 0)
+        if waiting:
+            chunk = ser.read(waiting)
+            if chunk:
+                buffer.extend(chunk)
+                if len(buffer) > DISCOVERY_RX_BUFFER_LIMIT:
+                    del buffer[:-DISCOVERY_RX_BUFFER_LIMIT]
+                found = find_device_identification_response(buffer, slave)
+                if found is not None:
+                    return found
+        elif stop_event.wait(0.001):
+            return None
+
+    return find_device_identification_response(buffer, slave)
+
+def device_identification_timeout_seconds(
+    baud: int,
+    parity: str,
+    stopbits: str,
+    minimum_timeout_ms: float = DISCOVERY_DEFAULT_MIN_TIMEOUT_MS,
+) -> float:
+    """Conservative timeout for one FC43/14 response, up to one RTU frame."""
+    baud = max(1, int(baud))
+    bits_per_char = discovery_bits_per_char(parity, stopbits)
+    char_s = bits_per_char / float(baud)
+    # A Modbus RTU ADU is at most 256 bytes. Allow one full response frame,
+    # the recommended t3.5 gap and a small device-processing margin.
+    calculated = (
+        256.0 * char_s
+        + modbus_rtu_interframe_gap_seconds(baud, bits_per_char)
+        + 0.020
+    )
+    return max(float(minimum_timeout_ms) / 1000.0, calculated)
+
+def device_identification_request_transmit_seconds(
+    baud: int, parity: str, stopbits: str
+) -> float:
+    """Estimated on-wire duration of the 7-byte FC43/14 request."""
+    return 7.0 * discovery_bits_per_char(parity, stopbits) / float(max(1, int(baud)))
+
+def format_device_identification(result) -> str:
+    """Return compact Device Identification text for the Finder result table."""
+    if result is None:
+        return "No response"
+    if result.get("kind") == "EXCEPTION":
+        code = int(result.get("exception_code", 0))
+        name = MODBUS_EXCEPTION_CODES.get(
+            code, ("Unknown/Reserved Exception", "")
+        )[0]
+        return f"Exception 0x{code:02X} — {name}"
+
+    objects = result.get("objects", {}) or {}
+    values = [objects.get(obj_id, "") for obj_id in DEVICE_ID_BASIC_OBJECTS]
+    if any(values):
+        return " | ".join(value or "—" for value in values)
+    return "Response — no Basic Device Identification objects"
+
+def read_basic_device_identification(
+    ser, slave, baud, parity, stopbits, minimum_timeout_ms, stop_event, serial_module
+):
+    """Read Basic Device Identification, following More Follows when required."""
+    object_id = 0x00
+    merged_objects = {}
+    frames = []
+    conformity_level = None
+
+    for _page in range(DEVICE_ID_MAX_PAGES):
+        if stop_event.is_set():
+            return None
+
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            raise
+
+        request = build_device_identification_probe(slave, object_id)
+        sent = write_discovery_request(
+            ser, request, baud, parity, stopbits, stop_event, serial_module
+        )
+        if not sent or stop_event.is_set():
+            return None
+
+        result = read_device_identification_response(
+            ser,
+            slave,
+            device_identification_timeout_seconds(
+                baud, parity, stopbits, minimum_timeout_ms
+            ),
+            stop_event,
+        )
+        if result is None or result.get("kind") == "EXCEPTION":
+            return result
+
+        frames.append(result["frame"])
+        merged_objects.update(result.get("objects", {}))
+        conformity_level = result.get("conformity_level")
+
+        # Basic identification is complete as soon as VendorName, ProductCode
+        # and MajorMinorRevision have all been received.
+        if all(obj_id in merged_objects for obj_id in DEVICE_ID_BASIC_OBJECTS):
+            return {
+                "kind": "DEVICE_ID",
+                "frame": b"".join(frames),
+                "exception_code": None,
+                "objects": merged_objects,
+                "more_follows": bool(result.get("more_follows")),
+                "next_object_id": int(result.get("next_object_id", 0)),
+                "conformity_level": conformity_level,
+            }
+
+        if not result.get("more_follows"):
+            break
+
+        next_object_id = int(result.get("next_object_id", 0))
+        if next_object_id == object_id:
+            break
+        object_id = next_object_id
+
+        gap_s = modbus_rtu_interframe_gap_seconds(
+            baud, discovery_bits_per_char(parity, stopbits)
+        )
+        if stop_event.wait(gap_s):
+            return None
+
+    return {
+        "kind": "DEVICE_ID",
+        "frame": b"".join(frames),
+        "exception_code": None,
+        "objects": merged_objects,
+        "more_follows": False,
+        "next_object_id": object_id,
+        "conformity_level": conformity_level,
+    } if frames else None
 
 def discovery_bits_per_char(parity: str, stopbits: str) -> float:
     """Return serial bits/character: start + 8 data + parity + stop."""
@@ -61,7 +319,9 @@ def discovery_response_timeout_seconds(
     bits_per_char = discovery_bits_per_char(parity, stopbits)
     char_s = bits_per_char / float(baud)
     normal_response_s = 7.0 * char_s
-    serial_margin_s = max(0.012, 3.5 * char_s)
+    serial_margin_s = max(
+        0.012, modbus_rtu_interframe_gap_seconds(baud, bits_per_char)
+    )
     calculated = normal_response_s + serial_margin_s
     return max(float(minimum_timeout_ms) / 1000.0, calculated)
 
@@ -190,7 +450,10 @@ def write_discovery_request(
     bits_per_char = discovery_bits_per_char(parity, stopbits)
     char_time_s = bits_per_char / float(max(1, int(baud)))
     request_wire_s = len(request) * char_time_s
-    retry_silence_s = max(0.050, request_wire_s + 3.5 * char_time_s)
+    retry_silence_s = max(
+        0.050,
+        request_wire_s + modbus_rtu_interframe_gap_seconds(baud, bits_per_char),
+    )
 
     for attempt in range(attempts):
         if stop_event.is_set():
@@ -425,13 +688,26 @@ class SlaveFinderMixin:
             text="FC04 fallback",
             variable=self.discovery_fc04_fallback_var,
         )
-        fallback_cb.grid(row=1, column=3, columnspan=2, sticky="w", padx=8, pady=5)
+        fallback_cb.grid(row=1, column=3, sticky="w", padx=8, pady=5)
+
+        self.discovery_device_identification_var = tk.BooleanVar(
+            value=finder_saved.get("device_identification", False)
+        )
+        device_id_cb = ttk.Checkbutton(
+            range_box,
+            text="Device Identification (FC43/14)",
+            variable=self.discovery_device_identification_var,
+        )
+        device_id_cb.grid(
+            row=1, column=4, sticky="w", padx=(4, 8), pady=5
+        )
 
         for var in (
             self.discovery_slave_start_var,
             self.discovery_slave_end_var,
             self.discovery_min_timeout_var,
             self.discovery_fc04_fallback_var,
+            self.discovery_device_identification_var,
         ):
             var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
 
@@ -440,7 +716,8 @@ class SlaveFinderMixin:
             text=(
                 "FC03 é o modo rápido. Uma resposta normal OU uma Modbus Exception com CRC válido "
                 "conta como slave encontrado. Ativa FC04 fallback apenas para dispositivos que "
-                "possam ignorar FC03 sem devolver Exception."
+                "possam ignorar FC03 sem devolver Exception. Device Identification envia FC43/14 "
+                "apenas aos slaves encontrados e tenta ler VendorName, ProductCode e Revision."
             ),
             wraplength=1120,
         ).grid(row=3, column=0, sticky="w", padx=10, pady=(4, 8))
@@ -494,7 +771,9 @@ class SlaveFinderMixin:
         results.columnconfigure(0, weight=1)
         results.rowconfigure(0, weight=1)
 
-        columns = ("slave", "baud", "config", "fc", "result", "resp", "raw")
+        columns = (
+            "slave", "baud", "config", "fc", "result", "resp", "device_id", "raw"
+        )
         self.discovery_tree = ttk.Treeview(
             results, columns=columns, show="headings", selectmode="browse"
         )
@@ -505,18 +784,46 @@ class SlaveFinderMixin:
             "fc": "FC",
             "result": "Resultado",
             "resp": "Resp. (ms)",
+            "device_id": "Device Identification",
             "raw": "Raw Hex",
         }
-        widths = {
-            "slave": 70, "baud": 90, "config": 85, "fc": 55,
-            "result": 260, "resp": 95, "raw": 350,
+        # Match the Traffic table behaviour: no horizontal scrollbar. Keep
+        # short fields compact and let the three text-heavy columns share the
+        # remaining viewport width. Column widths are recalculated whenever
+        # the Treeview is resized so the complete table remains visible.
+        self.discovery_fixed_widths = {
+            "slave": 70,
+            "baud": 90,
+            "config": 85,
+            "fc": 55,
+            "resp": 95,
+        }
+        self.discovery_flex_columns = ("result", "device_id", "raw")
+        self.discovery_flex_weights = {
+            "result": 0.27,
+            "device_id": 0.38,
+            "raw": 0.35,
+        }
+        self.discovery_flex_min_width = 90
+
+        initial_widths = {
+            **self.discovery_fixed_widths,
+            "result": 220,
+            "device_id": 330,
+            "raw": 300,
         }
         for col in columns:
             self.discovery_tree.heading(col, text=headings[col], anchor="center")
             self.discovery_tree.column(
-                col, width=widths[col], minwidth=55,
-                anchor="w" if col in ("result", "raw") else "center",
-                stretch=col in ("result", "raw"),
+                col,
+                width=initial_widths[col],
+                minwidth=(
+                    self.discovery_flex_min_width
+                    if col in self.discovery_flex_columns
+                    else self.discovery_fixed_widths[col]
+                ),
+                anchor="w" if col in self.discovery_flex_columns else "center",
+                stretch=False,
             )
 
         discovery_y = ttk.Scrollbar(
@@ -525,9 +832,43 @@ class SlaveFinderMixin:
         self.discovery_tree.configure(yscrollcommand=discovery_y.set)
         self.discovery_tree.grid(row=0, column=0, sticky="nsew")
         discovery_y.grid(row=0, column=1, sticky="ns")
+        self.discovery_tree.bind(
+            "<Configure>", self.fit_discovery_columns_to_viewport, add="+"
+        )
 
         self.update_discovery_estimate()
         self.update_discovery_start_state()
+
+    def fit_discovery_columns_to_viewport(self, _event=None):
+        """Fit Slave Finder columns to the visible Treeview width."""
+        if not hasattr(self, "discovery_tree"):
+            return
+
+        viewport_width = int(self.discovery_tree.winfo_width())
+        if viewport_width <= 1:
+            return
+
+        # Reserve a few pixels for Treeview borders so Tk never needs a hidden
+        # horizontal overflow area. The vertical scrollbar is a sibling and is
+        # therefore already excluded from winfo_width().
+        usable_width = max(1, viewport_width - 4)
+        fixed_total = sum(self.discovery_fixed_widths.values())
+        flex_count = len(self.discovery_flex_columns)
+        min_flex_total = self.discovery_flex_min_width * flex_count
+
+        flex_total = max(min_flex_total, usable_width - fixed_total)
+        allocated = 0
+        for index, col in enumerate(self.discovery_flex_columns):
+            if index == flex_count - 1:
+                width = flex_total - allocated
+            else:
+                width = int(round(flex_total * self.discovery_flex_weights[col]))
+                allocated += width
+            width = max(self.discovery_flex_min_width, width)
+            self.discovery_tree.column(col, width=width)
+
+        for col, width in self.discovery_fixed_widths.items():
+            self.discovery_tree.column(col, width=width)
 
     def on_discovery_options_changed(self):
         if hasattr(self, "discovery_estimate_var"):
@@ -579,6 +920,7 @@ class SlaveFinderMixin:
 
         total_units = len(configs) * len(slaves)
         probes_per_unit = 2 if self.discovery_fc04_fallback_var.get() else 1
+        identify_devices = bool(self.discovery_device_identification_var.get())
 
         seconds = 0.0
         for baud, parity, stopbits in configs:
@@ -589,10 +931,26 @@ class SlaveFinderMixin:
                 )
             )
             seconds += len(slaves) * probes_per_unit * per_probe
+            if identify_devices:
+                # Worst case: every probed Slave exists and therefore receives
+                # one optional Basic Device Identification query.
+                seconds += len(slaves) * (
+                    device_identification_request_transmit_seconds(
+                        baud, parity, stopbits
+                    )
+                    + device_identification_timeout_seconds(
+                        baud, parity, stopbits, minimum_timeout_ms
+                    )
+                )
             seconds += 0.025  # small reopen/reconfigure allowance
 
         self.discovery_progress_text_var.set(f"0 / {total_units}")
-        suffix = " (com FC04 fallback)" if probes_per_unit == 2 else ""
+        suffix_parts = []
+        if probes_per_unit == 2:
+            suffix_parts.append("FC04 fallback")
+        if identify_devices:
+            suffix_parts.append("Device Identification")
+        suffix = f" (com {' + '.join(suffix_parts)})" if suffix_parts else ""
         self.discovery_estimate_var.set(
             f"{len(configs)} config. × {len(slaves)} slaves — "
             f"máx. estimado: {format_duration(seconds)}{suffix}"
@@ -699,6 +1057,7 @@ class SlaveFinderMixin:
             return
 
         fallback_fc04 = bool(self.discovery_fc04_fallback_var.get())
+        identify_devices = bool(self.discovery_device_identification_var.get())
 
         self.clear_discovery_results()
         self.discovery_active = True
@@ -728,7 +1087,7 @@ class SlaveFinderMixin:
             target=self.discovery_worker,
             args=(
                 serial, port, immutable_configs, immutable_slaves,
-                minimum_timeout_ms, fallback_fc04
+                minimum_timeout_ms, fallback_fc04, identify_devices
             ),
             daemon=True,
         )
@@ -765,7 +1124,8 @@ class SlaveFinderMixin:
             cancel_serial_io(self.discovery_serial)
 
     def discovery_worker(
-        self, serial, port, configs, slaves, minimum_timeout_ms, fallback_fc04
+        self, serial, port, configs, slaves, minimum_timeout_ms, fallback_fc04,
+        identify_devices
     ):
         started = time.perf_counter()
         total_units = len(configs) * len(slaves)
@@ -805,9 +1165,8 @@ class SlaveFinderMixin:
                     response_timeout_s = discovery_response_timeout_seconds(
                         baud, parity, stopbits, minimum_timeout_ms
                     )
-                    char_gap_s = (
-                        3.5 * discovery_bits_per_char(parity, stopbits)
-                        / float(baud)
+                    char_gap_s = modbus_rtu_interframe_gap_seconds(
+                        baud, discovery_bits_per_char(parity, stopbits)
                     )
 
                     for slave in slaves:
@@ -887,6 +1246,36 @@ class SlaveFinderMixin:
                             else:
                                 result_text = "Response"
 
+                            device_id_text = ""
+                            if identify_devices and not self.discovery_stop_event.is_set():
+                                context = (
+                                    f"{port} — {baud} / {config_label} / "
+                                    f"Slave {slave} / FC43/14"
+                                )
+                                try:
+                                    device_result = read_basic_device_identification(
+                                        ser,
+                                        slave,
+                                        baud,
+                                        parity,
+                                        stopbits,
+                                        minimum_timeout_ms,
+                                        self.discovery_stop_event,
+                                        serial,
+                                    )
+                                except Exception as exc:
+                                    raise RuntimeError(
+                                        f"Falha em Device Identification em {context}: "
+                                        f"{type(exc).__name__}: {exc}"
+                                    ) from exc
+                                device_id_text = format_device_identification(
+                                    device_result
+                                )
+                                if char_gap_s > 0:
+                                    self.discovery_stop_event.wait(
+                                        min(char_gap_s, 0.05)
+                                    )
+
                             self.event_queue.put((
                                 "discovery_found",
                                 {
@@ -896,6 +1285,7 @@ class SlaveFinderMixin:
                                     "fc": f"{used_fc:02X}",
                                     "result": result_text,
                                     "response_ms": elapsed_ms,
+                                    "device_id": device_id_text,
                                     "raw": hex_bytes(result["frame"]),
                                 }
                             ))
@@ -976,6 +1366,7 @@ class SlaveFinderMixin:
                 payload["fc"],
                 payload["result"],
                 f"{payload['response_ms']:.1f}" if payload.get("response_ms") is not None else "",
+                payload.get("device_id", ""),
                 payload["raw"],
             )
         )

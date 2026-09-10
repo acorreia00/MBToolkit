@@ -13,7 +13,7 @@
 - Bus Health metrics including response times, timeouts and the percentage of non-validated bytes;
 - traffic filters, search, anomaly highlighting and CSV export;
 - complete TXT logging for real capture sessions;
-- **Bus Slave Finder** for active Slave ID discovery, with a safety warning;
+- **Bus Slave Finder** for active Slave ID discovery, with optional Device Identification (FC43/14) and a safety warning;
 - Light and Dark modes with persistent preferences.
 
 > **Warning:** the Sniffer is passive, but the **Bus Slave Finder transmits Modbus RTU requests**. Do not use it on a bus that already has another active master.

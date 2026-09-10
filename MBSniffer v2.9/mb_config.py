@@ -317,6 +317,10 @@ def load_ui_settings() -> dict:
                 finder_in.get("fc04_fallback"),
                 False,
             ),
+            "device_identification": _validated_bool(
+                finder_in.get("device_identification"),
+                False,
+            ),
         }
 
     return result

@@ -13,7 +13,7 @@
 - Bus Health com estatísticas, tempos de resposta, timeouts e percentagem de bytes não validados;
 - filtros de tráfego, pesquisa, realce de anomalias e exportação para CSV;
 - registo completo das capturas reais em TXT;
-- **Bus Slave Finder** para pesquisa ativa de Slave IDs, com aviso de segurança;
+- **Bus Slave Finder** para pesquisa ativa de Slave IDs, com Device Identification (FC43/14) opcional e aviso de segurança;
 - modos claro e escuro com preferências persistentes.
 
 > **Atenção:** o Sniffer é passivo, mas o **Bus Slave Finder transmite pedidos Modbus RTU**. Não deve ser utilizado num barramento que já tenha outro master ativo.

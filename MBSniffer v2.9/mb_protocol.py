@@ -39,6 +39,23 @@ def append_crc(payload: bytes) -> bytes:
 def hex_bytes(data: bytes) -> str:
     return " ".join(f"{b:02X}" for b in data)
 
+def modbus_rtu_interframe_gap_seconds(baud: int, bits_per_char: float) -> float:
+    """Return the recommended Modbus RTU t3.5 inter-frame gap.
+
+    Modbus Serial Line V1.02 requires the character-time timers to be
+    respected at baud rates up to and including 19200 bit/s. Above 19200
+    bit/s it recommends a fixed t3.5 value of 1.750 ms.
+    """
+    baud = int(baud)
+    bits_per_char = float(bits_per_char)
+    if baud <= 0:
+        raise ValueError("Baud rate must be greater than zero")
+    if bits_per_char <= 0:
+        raise ValueError("Bits per character must be greater than zero")
+    if baud > 19200:
+        return 0.001750
+    return 3.5 * bits_per_char / float(baud)
+
 def plausible_request_qty(fc: int, qty: int) -> bool:
     if fc in (1, 2):
         return 1 <= qty <= 2000

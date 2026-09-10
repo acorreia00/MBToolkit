@@ -136,14 +136,19 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
     def _guard_mouse_wheel(self, event):
         """
-        Allow wheel scrolling only when the pointer is on a scrollbar.
+        Keep wheel input local to genuinely scrollable content widgets.
 
-        Returning "break" at a bindtag placed before the widget/class bindings
-        prevents Treeview/Text scrolling and, on Windows, prevents ttk Notebook
-        tabs from cycling when the wheel is used over non-scrollbar areas.
+        Treeviews and Text widgets retain their normal vertical wheel scrolling,
+        as do the scrollbar widgets themselves.  Everywhere else the event is
+        consumed before ttk class bindings see it; in particular, this prevents
+        Windows ttk Notebook tabs from changing when the user turns the wheel
+        over a tab or over non-scrollable page content.
         """
         widget = getattr(event, "widget", None)
-        if isinstance(widget, (ttk.Scrollbar, tk.Scrollbar)):
+        if isinstance(
+            widget,
+            (ttk.Treeview, tk.Text, tk.Listbox, ttk.Scrollbar, tk.Scrollbar),
+        ):
             return None
         return "break"
 
@@ -399,6 +404,9 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                     "fc04_fallback": bool(
                         self.discovery_fc04_fallback_var.get()
                     ),
+                    "device_identification": bool(
+                        self.discovery_device_identification_var.get()
+                    ),
                 },
             }
             save_ui_settings(settings=payload)
@@ -426,6 +434,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             self.discovery_slave_end_var,
             self.discovery_min_timeout_var,
             self.discovery_fc04_fallback_var,
+            self.discovery_device_identification_var,
         )
 
         for variable in variables:
@@ -493,11 +502,14 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
     def _apply_bus_health_layout(self, compact):
         """
-        Re-grid Bus Health metrics without changing theme or content.
+        Re-grid Bus Health metrics inside equal vertical bands.
 
-        Full mode keeps one metric/value pair per row. Compact mode uses two
-        pairs per row so the cards stay inside their borders when the expanded
-        Frame Inspector leaves less vertical space.
+        Full mode uses one metric/value pair per row.  Compact mode uses two
+        pairs per row.  In both modes every used row receives the same weight,
+        so the metrics are distributed evenly over the card height instead of
+        accumulating at the top.  Compact columns use proportional uniform
+        widths (label/value + label/value), which keeps both halves aligned and
+        prevents one metric group from consuming the neighbouring group.
         """
         groups = getattr(self, "_health_metric_groups", ())
         if not groups:
@@ -508,37 +520,69 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                 label_widget.grid_forget()
                 value_widget.grid_forget()
 
+            # Clear weights left by the other layout before applying the new
+            # one.  Uniform groups are local to each LabelFrame.
+            for column in range(4):
+                card.columnconfigure(column, weight=0, minsize=0, uniform="")
+            for row in range(max(6, len(pairs))):
+                card.rowconfigure(row, weight=0, minsize=0, uniform="")
+
             if compact:
-                for column in range(4):
-                    card.columnconfigure(
-                        column,
-                        weight=1 if column in (1, 3) else 0,
-                        uniform="",
+                # Size the four compact columns from their real content.
+                # The two label columns absorb any spare width equally; value
+                # columns keep their natural size.  This avoids the clipping
+                # caused by forcing every card into one fixed percentage split.
+                for column in (0, 2):
+                    card.columnconfigure(column, weight=1, minsize=0, uniform="")
+                for column in (1, 3):
+                    card.columnconfigure(column, weight=0, minsize=0, uniform="")
+
+                used_rows = max(1, (len(pairs) + 1) // 2)
+                for row in range(used_rows):
+                    card.rowconfigure(
+                        row,
+                        weight=1,
+                        minsize=0,
+                        uniform="health_metric_rows",
                     )
 
                 pair_count = len(pairs)
+                card_width = max(320, int(card.winfo_width()))
+                # At normal widths the technical labels/values remain on one
+                # line.  Near the application's minimum width labels may wrap
+                # so the pair stays inside the LabelFrame instead of colliding
+                # with the neighbouring pair.
+                compact_label_wrap = (
+                    0 if card_width >= 390 else max(80, int(card_width * 0.29))
+                )
+
                 for index, (label_widget, value_widget) in enumerate(pairs):
                     row = index // 2
                     group = index % 2
-                    row_pady = (5 if row == 0 else 3, 3)
 
-                    # Odd final metrics use the complete last row. This avoids
-                    # squeezing the relatively long "Slave mais lento" value.
+                    try:
+                        label_widget.configure(wraplength=compact_label_wrap)
+                        value_widget.configure(wraplength=0)
+                    except tk.TclError:
+                        pass
+
+                    # Odd final metrics use the complete last row, leaving the
+                    # value the whole right-hand side of the card.
                     if index == pair_count - 1 and pair_count % 2:
                         label_widget.grid(
                             row=row,
                             column=0,
                             sticky="w",
-                            padx=(10, 8),
-                            pady=row_pady,
+                            padx=(6, 3),
+                            pady=1,
                         )
                         value_widget.grid(
                             row=row,
                             column=1,
                             columnspan=3,
                             sticky="e",
-                            padx=(8, 10),
-                            pady=row_pady,
+                            padx=(3, 6),
+                            pady=1,
                         )
                         continue
 
@@ -547,38 +591,56 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                         row=row,
                         column=base_column,
                         sticky="w",
-                        padx=((10 if base_column == 0 else 8), 5),
-                        pady=row_pady,
+                        padx=((6 if base_column == 0 else 5), 3),
+                        pady=1,
                     )
                     value_widget.grid(
                         row=row,
                         column=base_column + 1,
                         sticky="e",
-                        padx=(5, (8 if base_column == 0 else 10)),
-                        pady=row_pady,
+                        padx=(3, (5 if base_column == 0 else 6)),
+                        pady=1,
                     )
             else:
-                # Restore the original v2.9 Bus Health arrangement exactly.
-                card.columnconfigure(0, weight=0, uniform="")
-                card.columnconfigure(1, weight=1, uniform="")
-                card.columnconfigure(2, weight=0, uniform="")
-                card.columnconfigure(3, weight=0, uniform="")
+                # One pair per row, with every row sharing the card height
+                # equally.  Proportional columns keep labels and values aligned
+                # while still allowing long values to use the right-hand side.
+                card.columnconfigure(0, weight=1, minsize=0, uniform="")
+                card.columnconfigure(1, weight=0, minsize=0, uniform="")
+
+                used_rows = max(1, len(pairs))
+                for row in range(used_rows):
+                    card.rowconfigure(
+                        row,
+                        weight=1,
+                        minsize=0,
+                        uniform="health_metric_rows",
+                    )
+
+                card_width = max(320, int(card.winfo_width()))
+                full_label_wrap = (
+                    0 if card_width >= 330 else max(100, int(card_width * 0.55))
+                )
 
                 for row, (label_widget, value_widget) in enumerate(pairs):
-                    row_pady = (8 if row == 0 else 4, 4)
+                    try:
+                        label_widget.configure(wraplength=full_label_wrap)
+                        value_widget.configure(wraplength=0)
+                    except tk.TclError:
+                        pass
                     label_widget.grid(
                         row=row,
                         column=0,
                         sticky="w",
-                        padx=(10, 8),
-                        pady=row_pady,
+                        padx=(10, 6),
+                        pady=1,
                     )
                     value_widget.grid(
                         row=row,
                         column=1,
                         sticky="e",
-                        padx=(8, 10),
-                        pady=row_pady,
+                        padx=(6, 10),
+                        pady=1,
                     )
 
         self._health_layout_compact = bool(compact)
@@ -629,6 +691,11 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             if should_compact != compact:
                 self._apply_bus_health_layout(should_compact)
                 self.update_idletasks()
+            else:
+                # Width can change without crossing the vertical compact/full
+                # threshold. Reapply the current layout so wrap limits and the
+                # equal-width grid continue to match the real card size.
+                self._apply_bus_health_layout(compact)
 
         except tk.TclError:
             return
@@ -783,7 +850,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
         # Row 2 — serial format
         cell = config_cell(1, 0)
-        ttk.Label(cell, text="Baud").grid(row=0, column=0, sticky="w", pady=(0, 2))
+        ttk.Label(cell, text="Baud rate").grid(row=0, column=0, sticky="w", pady=(0, 2))
         self.baud_var = tk.StringVar(value=sniffer_saved.get("baud", "9600"))
         ttk.Combobox(
             cell, textvariable=self.baud_var, width=13,
@@ -1541,16 +1608,17 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "Parâmetros errados podem produzir bytes aparentemente aleatórios, frames com "
             "CRC inválido ou ausência total de frames reconhecíveis.\n"
         )
-        h("• Baud — velocidade em bit/s, por exemplo 9600 ou 19200.\n", "bullet")
+        h("• Baud rate — velocidade em bit/s, por exemplo 9600 ou 19200.\n", "bullet")
         h("• Data bits — normalmente 8 em Modbus RTU.\n", "bullet")
         h("• Parity — None, Even, Odd, Mark ou Space, conforme a instalação.\n", "bullet")
         h("• Stop bits — 1, 1.5 ou 2, conforme a configuração observada.\n", "bullet")
 
         h("Frame gap\n", "heading")
         h(
-            "Em Auto, o programa usa 3,5 tempos de carácter como referência para separar "
-            "bursts RTU. O modo Manual permite definir outro valor em milissegundos para "
-            "diagnóstico de equipamentos ou drivers com comportamento particular.\n"
+            "Em Auto, o programa usa 3,5 tempos de carácter até 19200 bit/s, inclusive. "
+            "Acima de 19200 bit/s usa o t3.5 fixo de 1,750 ms recomendado para Modbus RTU. "
+            "O modo Manual permite definir outro valor em milissegundos para diagnóstico "
+            "de equipamentos ou drivers com comportamento particular.\n"
         )
         h(
             "Os adaptadores USB e o Windows podem agrupar bytes e introduzir latência. "
@@ -1831,6 +1899,12 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "FC04 fallback é opcional e aumenta o número máximo de tentativas. O timeout "
             "mínimo é adaptado ao baud rate. Um write timeout significa falha ao transmitir "
             "pela porta/driver e não deve ser interpretado simplesmente como “slave sem resposta”.\n"
+        )
+        h(
+            "Device Identification (FC43/14) é opcional. Quando ativo, só é enviado depois "
+            "de um Slave ter sido encontrado e tenta ler Basic Device Identification: "
+            "VendorName, ProductCode e MajorMinorRevision. Uma Exception ou ausência de "
+            "resposta a FC43/14 não invalida a descoberta do Slave.\n"
         )
         h(
             "O Finder e o Sniffer partilham o bloqueio global de atividade para impedir que "

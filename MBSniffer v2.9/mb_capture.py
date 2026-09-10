@@ -24,6 +24,7 @@ from mb_config import (
 from mb_protocol import (
     parse_burst,
     build_anomaly_simulation_plan,
+    modbus_rtu_interframe_gap_seconds,
 )
 from mb_slave_finder import cancel_serial_io
 
@@ -354,7 +355,7 @@ class CaptureMixin:
         parity_bits = 0 if self.parity_var.get() == "None" else 1
         stop_bits = float(self.stop_var.get())
         bits_per_char = 1 + data_bits + parity_bits + stop_bits
-        return 3.5 * bits_per_char / baud * 1000.0
+        return modbus_rtu_interframe_gap_seconds(baud, bits_per_char) * 1000.0
 
     def serial_config(self, serial):
         byte_map = {
