@@ -355,7 +355,7 @@ def get_application_directory() -> Path:
 
     - PyInstaller EXE: directory containing MBSniffer.exe.
     - Packaged Python/BAT mode: directory containing the root MBSniffer.bat.
-      The Python sources live inside the child ``MBSniffer`` folder.
+      The Python sources live inside the versioned child folder, e.g. ``MBSniffer v2.9``.
     - Development Python mode: directory containing this module.
     """
     try:

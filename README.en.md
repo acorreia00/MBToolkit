@@ -28,4 +28,4 @@ MBSniffer.bat
 
 The launcher checks Python and installs `pyserial` when required. To build the standalone executable, use `MBSniffer v2.9\build_exe.bat`.
 
-Preferences are stored in `%APPDATA%\MBSniffer\settings.json`. COM-port selections are not persisted.
+Application preferences are stored in `%APPDATA%\MBSniffer\settings.json`. The selected COM port is not saved, so you must choose the port again each time you start the program.

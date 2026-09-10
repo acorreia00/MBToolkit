@@ -28,4 +28,4 @@ MBSniffer.bat
 
 O ficheiro de arranque verifica Python e instala `pyserial` quando necessário. Para criar o executável autónomo, utilizar `MBSniffer v2.9\build_exe.bat`.
 
-As preferências são guardadas em `%APPDATA%\MBSniffer\settings.json`. As portas COM não são persistidas.
+As preferências da aplicação são guardadas em `%APPDATA%\MBSniffer\settings.json`. A porta COM escolhida não fica guardada: sempre que iniciar o programa, deve selecionar novamente a porta que pretende utilizar.
