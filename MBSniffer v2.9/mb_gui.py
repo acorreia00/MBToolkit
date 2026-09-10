@@ -670,7 +670,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
         ttk.Label(
             self.theme_overlay,
-            text="Dark mode",
+            text="Modo escuro",
         ).grid(row=0, column=0, sticky="e", padx=(0, 6))
 
         self.dark_mode_var = tk.BooleanVar(value=self.initial_dark_mode)
@@ -979,12 +979,12 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         for col in range(4):
             stats.columnconfigure(col, weight=1, uniform="stats")
 
-        self.stat_requests_var = tk.StringVar(value="Requests: 0")
-        self.stat_responses_var = tk.StringVar(value="Responses: 0")
-        self.stat_pending_var = tk.StringVar(value="Pending: 0")
+        self.stat_requests_var = tk.StringVar(value="Pedidos: 0")
+        self.stat_responses_var = tk.StringVar(value="Respostas: 0")
+        self.stat_pending_var = tk.StringVar(value="Pendentes: 0")
         self.stat_timeouts_var = tk.StringVar(value="Timeouts: 0")
-        self.stat_crc_var = tk.StringVar(value="CRC errors: 0")
-        self.stat_exceptions_var = tk.StringVar(value="Exceptions: 0")
+        self.stat_crc_var = tk.StringVar(value="Erros de CRC: 0")
+        self.stat_exceptions_var = tk.StringVar(value="Exceções: 0")
         self.stat_raw_var = tk.StringVar(value="RAW: 0")
         self.stat_slaves_var = tk.StringVar(value="Slaves: 0")
 
@@ -1220,7 +1220,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             command=self.copy_selected_raw,
         )
         self.traffic_context_menu.add_command(
-            label="Copiar frame decodificada",
+            label="Copiar frame descodificado",
             command=self.copy_selected_decoded,
         )
         self.traffic_context_menu.add_separator()
@@ -1314,7 +1314,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         self.health_resp_min_var = tk.StringVar(value="—")
         self.health_resp_max_var = tk.StringVar(value="—")
         self.health_p95_var = tk.StringVar(value="—")
-        self.health_crc_rate_var = tk.StringVar(value="0.00 %")
+        self.health_nonvalidated_rate_var = tk.StringVar(value="0.00 %")
         self.health_timeout_rate_var = tk.StringVar(value="0.00 %")
         self.health_bus_load_var = tk.StringVar(value="0.00 %")
         self.health_slaves_var = tk.StringVar(value="0")
@@ -1337,12 +1337,12 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             )
 
         traffic_pairs = [
-            health_item(traffic_health, "Requests", self.health_requests_var),
-            health_item(traffic_health, "Responses", self.health_responses_var),
-            health_item(traffic_health, "Request rate", self.health_req_rate_var),
+            health_item(traffic_health, "Pedidos", self.health_requests_var),
+            health_item(traffic_health, "Respostas", self.health_responses_var),
+            health_item(traffic_health, "Taxa de pedidos", self.health_req_rate_var),
             health_item(traffic_health, "Slaves ativos", self.health_slaves_var),
             health_item(traffic_health, "Bytes observados", self.health_total_bytes_var),
-            health_item(traffic_health, "Utilização bus ~", self.health_bus_load_var),
+            health_item(traffic_health, "Utilização do bus ~", self.health_bus_load_var),
         ]
         response_pairs = [
             health_item(response_health, "Média", self.health_resp_avg_var),
@@ -1352,14 +1352,14 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             health_item(response_health, "Slave mais lento", self.health_slowest_var),
         ]
         quality_pairs = [
-            health_item(quality_health, "CRC errors", self.health_crc_count_var),
-            health_item(quality_health, "CRC error rate", self.health_crc_rate_var),
+            health_item(quality_health, "Erros de CRC", self.health_crc_count_var),
+            health_item(quality_health, "Bytes não validados", self.health_nonvalidated_rate_var),
             health_item(quality_health, "Timeouts", self.health_timeout_count_var),
-            health_item(quality_health, "Timeout rate", self.health_timeout_rate_var),
-            health_item(quality_health, "Exceptions", self.health_exception_count_var),
+            health_item(quality_health, "Taxa de timeout", self.health_timeout_rate_var),
+            health_item(quality_health, "Exceções", self.health_exception_count_var),
             health_item(
                 quality_health,
-                "Exceptions / Slave",
+                "Exceções / Slave",
                 self.health_exception_slaves_var,
                 wraplength=190,
             ),
@@ -1443,7 +1443,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         h("3. Mantém Frame gap em Auto, salvo quando tens uma razão concreta para o ajustar.\n", "bullet")
         h("4. Clica em “Iniciar Captura” e confirma atividade através de BUS ● RX.\n", "bullet")
         h("5. Usa Tráfego para diagnóstico rápido e Raw Hex / Log para confirmar os bytes reais.\n", "bullet")
-        h("6. Seleciona uma frame para obter a análise detalhada no Frame Inspector.\n", "bullet")
+        h("6. Seleciona um frame para obter a análise detalhada no Frame Inspector.\n", "bullet")
 
         h("1. RS485 2-wire\n", "heading")
         h(
@@ -1573,7 +1573,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
         h("Como interpretar a tabela Tráfego\n", "heading")
         h("• REQUEST — pedido Modbus RTU reconhecido pelo parser.\n", "bullet")
-        h("• RESPONSE — resposta Modbus RTU reconhecida e não-exception.\n", "bullet")
+        h("• RESPONSE — resposta Modbus RTU reconhecida que não é uma EXCEPTION.\n", "bullet")
         h(
             "• EXCEPTION — resposta Modbus com Function Code de exceção (bit 7 ativo). "
             "Detalhes mostra o código e a descrição normalizada.\n",
@@ -1587,7 +1587,8 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         )
         h(
             "• RAW/UNSYNC — bytes descartados durante uma recuperação de sincronismo antes "
-            "de ser encontrado, mais à frente no mesmo burst, um novo frame CRC-válido.\n",
+            "de ser encontrado, mais à frente no mesmo burst, um frame de estrutura "
+            "reconhecida com CRC válido.\n",
             "bullet"
         )
         h(
@@ -1603,7 +1604,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
         h("Colunas da tabela Tráfego\n", "heading")
         h("• Hora — timestamp do início do burst/frame processado.\n", "bullet")
-        h("• Δt — intervalo desde a frame anterior observada.\n", "bullet")
+        h("• Δt — intervalo desde o frame anterior observada.\n", "bullet")
         h(
             "• Resp. — tempo entre um REQUEST e a RESPONSE/EXCEPTION emparelhada. "
             "Fica vazio quando não existe um par válido.\n",
@@ -1720,7 +1721,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         h("Menu de contexto do Tráfego\n", "heading")
         h("Clica com o botão direito numa frame real para:\n")
         h("• Copiar Raw Hex.\n", "bullet")
-        h("• Copiar a frame decodificada.\n", "bullet")
+        h("• Copiar o frame descodificado.\n", "bullet")
         h("• Filtrar pelo Slave dessa frame.\n", "bullet")
         h("• Filtrar pelo Function Code dessa frame.\n", "bullet")
         h("• Mostrar apenas a transação REQUEST/RESPONSE correspondente.\n", "bullet")
@@ -1731,8 +1732,8 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "O separador Bus Health resume a qualidade e o desempenho da sessão sem "
             "substituir a tabela de frames.\n"
         )
-        h("• Requests / Responses — contadores da sessão.\n", "bullet")
-        h("• Request rate — número médio de pedidos observados por segundo.\n", "bullet")
+        h("• Pedidos / Respostas — contadores da sessão.\n", "bullet")
+        h("• Taxa de pedidos — número médio de pedidos observados por segundo.\n", "bullet")
         h("• Slaves ativos — IDs Modbus válidos observados na sessão.\n", "bullet")
         h("• Bytes observados — soma dos bytes entregues ao parser.\n", "bullet")
         h(
@@ -1747,9 +1748,9 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "observadas.\n",
             "bullet"
         )
-        h("• CRC error rate — percentagem de frames contabilizados com CRC inválido.\n", "bullet")
-        h("• Timeout rate — percentagem de REQUEST que expiraram sem resposta emparelhada.\n", "bullet")
-        h("• Exceptions / Slave — distribuição das respostas Exception por Slave ID.\n", "bullet")
+        h("• Bytes não validados — percentagem dos bytes observados que pertencem a frames com CRC inválido ou a blocos RAW. Não prova, por si só, a existência de ruído elétrico; parâmetros série errados, captura incompleta ou funções não suportadas pelo parser também podem produzir RAW.\n", "bullet")
+        h("• Taxa de timeout — percentagem de REQUEST que expiraram sem resposta emparelhada.\n", "bullet")
+        h("• Exceções / Slave — distribuição das respostas Exception por Slave ID.\n", "bullet")
 
         h("Indicador BUS RX\n", "heading")
         h(
@@ -1903,7 +1904,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         ttk.Label(
             inspector_header,
             text=(
-                "Seleciona uma linha no Tráfego para ver a decodificação "
+                "Seleciona uma linha no Tráfego para ver a descodificação "
                 "estruturada do frame."
             ),
         ).grid(row=0, column=0, sticky="w")

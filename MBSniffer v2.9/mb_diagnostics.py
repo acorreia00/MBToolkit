@@ -44,7 +44,7 @@ def function_label(record):
     fc = fc_number(record)
     if fc is None:
         return "—"
-    name = FUNCTION_NAMES.get(fc, "Unknown/other")
+    name = FUNCTION_NAMES.get(fc, "Desconhecida/outra")
     return f"0x{fc:02X} — {name}"
 
 
@@ -89,7 +89,7 @@ def response_payload(record):
                 (data[i] << 8) | data[i + 1]
                 for i in range(0, len(data), 2)
             ]
-            decoded = f"Registers={regs}"
+            decoded = f"Registos={regs}"
         return byte_count, data_hex, decoded
 
     if kind == "REQUEST" and fc in (15, 16) and len(frame) >= 9:
@@ -208,7 +208,7 @@ def inspector_values(record, successful_request=False):
         crc_text = f"CRC: {crc_state or '—'}"
     else:
         crc_text = (
-            f"CRC: recv 0x{received:04X} / calc 0x{calculated:04X} — {crc_state}"
+            f"CRC: recebido 0x{received:04X} / calculado 0x{calculated:04X} — {crc_state}"
         )
 
     byte_count, data_hex, decoded = response_payload(record)

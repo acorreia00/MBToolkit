@@ -35,12 +35,12 @@ class ViewMixin:
         self.update_stats_labels()
 
     def update_stats_labels(self):
-        self.stat_requests_var.set(f"Requests: {self.metrics.requests}")
-        self.stat_responses_var.set(f"Responses: {self.metrics.responses}")
-        self.stat_pending_var.set(f"Pending: {self.metrics.pending_count()}")
+        self.stat_requests_var.set(f"Pedidos: {self.metrics.requests}")
+        self.stat_responses_var.set(f"Respostas: {self.metrics.responses}")
+        self.stat_pending_var.set(f"Pendentes: {self.metrics.pending_count()}")
         self.stat_timeouts_var.set(f"Timeouts: {self.metrics.timeouts}")
-        self.stat_crc_var.set(f"CRC errors: {self.metrics.crc_errors}")
-        self.stat_exceptions_var.set(f"Exceptions: {self.metrics.exceptions}")
+        self.stat_crc_var.set(f"Erros de CRC: {self.metrics.crc_errors}")
+        self.stat_exceptions_var.set(f"Exceções: {self.metrics.exceptions}")
         self.stat_raw_var.set(f"RAW: {self.metrics.raw}")
 
         try:
@@ -76,7 +76,7 @@ class ViewMixin:
             "health_resp_min_var": ms(summary["response_min_ms"]),
             "health_resp_max_var": ms(summary["response_max_ms"]),
             "health_p95_var": ms(summary["response_p95_ms"]),
-            "health_crc_rate_var": f"{summary['crc_rate_pct']:.2f} %",
+            "health_nonvalidated_rate_var": f"{summary['nonvalidated_rate_pct']:.2f} %",
             "health_timeout_rate_var": f"{summary['timeout_rate_pct']:.2f} %",
             "health_bus_load_var": f"{summary['bus_load_pct']:.2f} %",
             "health_slaves_var": str(summary["active_slaves"]),
@@ -89,7 +89,7 @@ class ViewMixin:
             mappings["health_slowest_var"] = "—"
         else:
             mappings["health_slowest_var"] = (
-                f"Slave {slowest_slave} — {summary['slowest_avg_ms']:.1f} ms avg"
+                f"Slave {slowest_slave} — média {summary['slowest_avg_ms']:.1f} ms"
             )
 
         for attr, value in mappings.items():

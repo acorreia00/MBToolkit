@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 title MBSniffer 2.9
 set "ROOT=%~dp0"
-set "APPDIR=%~dp0MBSniffer"
+set "APPDIR=%~dp0MBSniffer v2.9"
 set "SCRIPT=%APPDIR%\MBSniffer.py"
 cd /d "%APPDIR%"
 set "PYRUN="

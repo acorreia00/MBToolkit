@@ -46,25 +46,42 @@ def plausible_request_qty(fc: int, qty: int) -> bool:
         return 1 <= qty <= 125
     return True
 
-def candidate_prefixes(buf: bytes):
-    if len(buf) < 2:
+def _plausible_unit_id(value: int) -> bool:
+    """Return True for Modbus RTU unit addresses that can appear on the wire."""
+    try:
+        return 0 <= int(value) <= 247
+    except (TypeError, ValueError):
+        return False
+
+
+def _candidate_prefixes_at(buf, start=0):
+    """Return structurally plausible known-frame lengths at *start*."""
+    remaining = len(buf) - int(start)
+    if remaining < 2:
         return []
 
-    fc = buf[1]
+    unit = buf[start]
+    if not _plausible_unit_id(unit):
+        return []
+
+    fc = buf[start + 1]
     out = []
 
     if fc & 0x80:
-        out.append((5, "EXCEPTION"))
+        # Exception responses use FC | 0x80 and have a fixed five-byte length.
+        base_fc = fc & 0x7F
+        if base_fc in (1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 22, 23):
+            out.append((5, "EXCEPTION"))
         return out
 
     if fc in (1, 2, 3, 4):
-        if len(buf) >= 6:
-            qty = (buf[4] << 8) | buf[5]
+        if remaining >= 6:
+            qty = (buf[start + 4] << 8) | buf[start + 5]
             if plausible_request_qty(fc, qty):
                 out.append((8, "REQUEST"))
 
-        if len(buf) >= 3:
-            byte_count = buf[2]
+        if remaining >= 3:
+            byte_count = buf[start + 2]
             resp_len = 5 + byte_count
             if fc in (3, 4):
                 if byte_count > 0 and byte_count % 2 == 0:
@@ -78,15 +95,14 @@ def candidate_prefixes(buf: bytes):
     elif fc == 7:
         # FC07 request: Slave + FC + CRC = 4 bytes.
         # FC07 response: Slave + FC + Status + CRC = 5 bytes.
-        # Try RESPONSE first when enough bytes are present.
-        if len(buf) >= 5:
+        if remaining >= 5:
             out.append((5, "RESPONSE"))
         out.append((4, "REQUEST"))
 
     elif fc in (15, 16):
         out.append((8, "RESPONSE"))
-        if len(buf) >= 7:
-            byte_count = buf[6]
+        if remaining >= 7:
+            byte_count = buf[start + 6]
             if byte_count > 0:
                 out.append((9 + byte_count, "REQUEST"))
 
@@ -94,12 +110,12 @@ def candidate_prefixes(buf: bytes):
         out.append((10, "REQ/RESP"))
 
     elif fc == 23:
-        if len(buf) >= 3:
-            bc = buf[2]
+        if remaining >= 3:
+            bc = buf[start + 2]
             if bc > 0 and bc % 2 == 0:
                 out.append((5 + bc, "RESPONSE"))
-        if len(buf) >= 11:
-            bc = buf[10]
+        if remaining >= 11:
+            bc = buf[start + 10]
             if bc > 0:
                 out.append((13 + bc, "REQUEST"))
 
@@ -111,55 +127,101 @@ def candidate_prefixes(buf: bytes):
             cleaned.append((length, kind))
     return cleaned
 
-def find_valid_prefix(buf: bytes):
-    for length, kind in candidate_prefixes(buf):
-        if len(buf) >= length and crc_ok(buf[:length]):
-            return length, kind
 
-    if len(buf) >= 5:
-        for length in range(5, min(len(buf), 260) + 1):
-            if crc_ok(buf[:length]):
-                return length, "UNKNOWN"
+def candidate_prefixes(buf: bytes):
+    """Compatibility wrapper for callers/tests that inspect offset zero."""
+    return _candidate_prefixes_at(buf, 0)
+
+
+def _crc_ok_at(buf, start: int, length: int) -> bool:
+    """CRC check without copying the whole remaining capture buffer."""
+    if length < 4 or start < 0 or start + length > len(buf):
+        return False
+    end = start + length
+    expected = crc16_modbus(memoryview(buf)[start:end - 2])
+    received = buf[end - 2] | (buf[end - 1] << 8)
+    return expected == received
+
+
+def find_valid_prefix(buf: bytes, start=0):
+    """Find a CRC-valid, structurally recognised Modbus frame at *start*."""
+    for length, kind in _candidate_prefixes_at(buf, start):
+        if start + length <= len(buf) and _crc_ok_at(buf, start, length):
+            return length, kind
     return None
 
+
 def guess_invalid_whole_frame(buf: bytes):
-    if len(buf) < 4:
+    """Classify a complete known-shape frame whose CRC is invalid."""
+    if len(buf) < 4 or not _plausible_unit_id(buf[0]):
         return None
-    for length, kind in candidate_prefixes(buf):
+    for length, kind in _candidate_prefixes_at(buf, 0):
         if len(buf) == length:
             return kind
     return None
+
+
+def _unknown_whole_frame_is_valid(buf: bytes) -> bool:
+    """Conservative fallback for one unsupported FC occupying the whole burst.
+
+    Unknown frames cannot be length-validated from their FC, so CRC-only
+    recognition is deliberately restricted to the complete remaining burst.
+    It is never used while scanning arbitrary offsets for resynchronisation.
+    """
+    if not 4 <= len(buf) <= 260:
+        return False
+    if not _plausible_unit_id(buf[0]):
+        return False
+    if _candidate_prefixes_at(buf, 0):
+        return False
+    return crc_ok(buf)
+
 
 def split_capture_buffer(data: bytes):
     results = []
     buf = bytearray(data)
 
     while buf:
-        match = find_valid_prefix(bytes(buf))
+        match = find_valid_prefix(buf, 0)
         if match:
             length, kind = match
             results.append((bytes(buf[:length]), kind, "OK"))
             del buf[:length]
             continue
 
+        # Search the full remaining burst, but only for structurally recognised
+        # Modbus frames. The former generic CRC scan tried up to 256 candidate
+        # lengths at every offset and became very slow on long noise bursts.
+        # Restricting resynchronisation to known frame shapes makes the scan
+        # effectively linear in the burst size and strongly reduces accidental
+        # CRC-only "phantom" frames in random noise.
         found_offset = None
-        # Out-of-sync recovery must inspect the full remaining burst. A fixed
-        # 32-byte cap could swallow later valid RTU frames after a longer
-        # corruption/noise run in the same inter-frame-gap capture buffer.
         search_limit = max(len(buf) - 4, 0)
         for offset in range(1, search_limit + 1):
-            if find_valid_prefix(bytes(buf[offset:])):
+            if find_valid_prefix(buf, offset):
                 found_offset = offset
                 break
 
         if found_offset is not None:
-            results.append((bytes(buf[:found_offset]), "RAW/UNSYNC", "UNKNOWN"))
+            prefix = bytes(buf[:found_offset])
+
+            # If the bytes immediately before the recovered frame are exactly a
+            # recognised Modbus frame shape, preserve the useful CRC diagnosis
+            # instead of hiding it as RAW/UNSYNC. Otherwise they are genuinely
+            # unsynchronised bytes and remain RAW.
+            guessed = guess_invalid_whole_frame(prefix)
+            if guessed:
+                results.append((prefix, guessed, "ERROR"))
+            else:
+                results.append((prefix, "RAW/UNSYNC", "UNKNOWN"))
             del buf[:found_offset]
             continue
 
         guessed = guess_invalid_whole_frame(bytes(buf))
         if guessed:
             results.append((bytes(buf), guessed, "ERROR"))
+        elif _unknown_whole_frame_is_valid(bytes(buf)):
+            results.append((bytes(buf), "UNKNOWN", "OK"))
         else:
             results.append((bytes(buf), "RAW/UNPARSED", "UNKNOWN"))
         break
@@ -224,7 +286,7 @@ def decode_frame(frame: bytes, kind_hint: str):
             if fc in (3, 4) and bc % 2 == 0 and len(frame) >= 5 + bc:
                 data = frame[3:3+bc]
                 regs = [(data[i] << 8) | data[i+1] for i in range(0, len(data), 2)]
-                details += f"  Registers={regs}"
+                details += f"  Registos={regs}"
             info["details"] = details
             return info
 
@@ -319,6 +381,7 @@ class SessionMetrics:
 
         # Bus Health.
         self.total_bytes = 0
+        self.nonvalidated_bytes = 0
         self.active_slaves = set()
         self.exception_by_slave = defaultdict(int)
         self.response_times_ms = deque(maxlen=10000)
@@ -447,9 +510,10 @@ class SessionMetrics:
         crc = row.get("crc", "")
 
         try:
-            self.total_bytes += max(0, int(row.get("_frame_len", 0)))
+            frame_len = max(0, int(row.get("_frame_len", 0)))
         except (TypeError, ValueError):
-            pass
+            frame_len = 0
+        self.total_bytes += frame_len
 
         try:
             slave_num = int(row.get("slave", ""))
@@ -460,6 +524,13 @@ class SessionMetrics:
 
         if crc == "ERROR":
             self.crc_errors += 1
+
+        # RAW bytes cannot honestly be called CRC errors: there may be no
+        # complete frame on which to validate a CRC. For Bus Health we track
+        # them together with explicit CRC failures as traffic that could not be
+        # validated as a correct Modbus RTU frame.
+        if crc == "ERROR" or str(row_type).startswith("RAW"):
+            self.nonvalidated_bytes += frame_len
 
         if row_type == "REQUEST":
             self.requests += 1
@@ -567,14 +638,9 @@ class SessionMetrics:
             if elapsed > 0.0 else 0.0
         )
 
-        total_frames = (
-            self.requests
-            + self.responses
-            + self.raw
-        )
-        crc_rate = (
-            100.0 * self.crc_errors / total_frames
-            if total_frames else 0.0
+        nonvalidated_rate = (
+            100.0 * self.nonvalidated_bytes / self.total_bytes
+            if self.total_bytes else 0.0
         )
         timeout_rate = (
             100.0 * self.timeouts / self.requests
@@ -613,7 +679,7 @@ class SessionMetrics:
             "response_min_ms": response_min,
             "response_max_ms": response_max,
             "response_p95_ms": response_p95,
-            "crc_rate_pct": crc_rate,
+            "nonvalidated_rate_pct": nonvalidated_rate,
             "timeout_rate_pct": timeout_rate,
             "active_slaves": len(self.active_slaves),
             "bus_load_pct": bus_load,
@@ -621,6 +687,7 @@ class SessionMetrics:
             "slowest_avg_ms": slowest_avg,
             "exception_summary": exception_summary,
             "total_bytes": self.total_bytes,
+            "nonvalidated_bytes": self.nonvalidated_bytes,
         }
 
 def u16_bytes(value):
