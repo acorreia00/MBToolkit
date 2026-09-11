@@ -29,7 +29,16 @@ from mb_capture import CaptureMixin
 from mb_view import ViewMixin
 from mb_widgets import RefreshButton, ToggleSwitch
 from mb_theme import apply_modern_theme, apply_theme, theme_colors
-
+from mb_i18n import (
+    LANGUAGE_CHOICES,
+    LANGUAGE_ENGLISH,
+    LANGUAGE_PORTUGUESE,
+    canonical_ui_text,
+    english_help_blocks,
+    normalize_language,
+    translate_text,
+    translate_runtime_text,
+)
 
 
 class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
@@ -40,6 +49,9 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         # Load the remembered mode before any ttk widgets are constructed.
         # Light and Dark use one fixed ttk construction; only colours differ.
         self.ui_settings = load_ui_settings()
+        self.current_language = normalize_language(
+            self.ui_settings.get("language", LANGUAGE_PORTUGUESE)
+        )
         self.initial_dark_mode = bool(self.ui_settings.get("dark_mode", False))
         self.ui_style = apply_modern_theme(
             self,
@@ -121,6 +133,9 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         self.metrics = SessionMetrics()
 
         self._build_ui()
+        self._freeze_language_layout_geometry()
+        self._capture_portuguese_help()
+        self.apply_language(save=False)
         self._install_mouse_wheel_guard()
         self.rebuild_slave_filter_menu()
         self.refresh_ports()
@@ -133,6 +148,69 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(50, self.process_queue)
         self.after(1000, self.poll_com_status)
+
+
+    def _freeze_language_layout_geometry(self):
+        """Freeze language-independent container geometry using the PT layout.
+
+        The UI is constructed from the canonical Portuguese captions. Capture
+        the natural geometry before any runtime translation and use those
+        dimensions as layout constraints. Language changes may replace text,
+        but must never move or resize the surrounding controls/panels.
+        """
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+
+        # The global language/theme overlay is anchored to the top-right.
+        # Freeze the canonical PT grid-cell widths. English captions are shorter
+        # here, so this preserves the exact existing PT positions and prevents
+        # the Dark Mode switch / language combobox from sliding left or right.
+        overlay = getattr(self, "theme_overlay", None)
+        if overlay is not None:
+            try:
+                self.update_idletasks()
+                canonical_column_widths = [
+                    max(1, int(overlay.grid_bbox(column, 0)[2]))
+                    for column in range(4)
+                ]
+                for column, width in enumerate(canonical_column_widths):
+                    overlay.columnconfigure(column, minsize=width)
+                self.update_idletasks()
+                self._language_overlay_width = max(1, overlay.winfo_reqwidth())
+                self._language_overlay_height = max(1, overlay.winfo_reqheight())
+                overlay.place_configure(
+                    width=self._language_overlay_width,
+                    height=self._language_overlay_height,
+                )
+            except (tk.TclError, IndexError, TypeError):
+                pass
+
+        # The Finder configuration includes wrapped explanatory text. It must
+        # be measured while the Finder page is actually laid out; measuring a
+        # hidden Notebook page can under-estimate the PT height by one line.
+        page = getattr(self, "discovery_page", None)
+        options = getattr(self, "_discovery_options_frame", None)
+        if page is not None and options is not None:
+            try:
+                selected_tab = self.main_notebook.select()
+                self.main_notebook.select(page)
+                self.update_idletasks()
+                height = max(options.winfo_height(), options.winfo_reqheight(), 1)
+                # grid row height also includes the widget's external pady.
+                # Preserve the complete PT cell, not only the LabelFrame body.
+                try:
+                    cell_height = max(height, int(page.grid_bbox(0, 1)[3]))
+                except (tk.TclError, TypeError, IndexError):
+                    cell_height = height + 12
+                self._language_discovery_options_height = height
+                page.rowconfigure(1, minsize=cell_height)
+                options.grid_configure(sticky="nsew")
+                self.main_notebook.select(selected_tab)
+                self.update_idletasks()
+            except tk.TclError:
+                pass
 
     def _guard_mouse_wheel(self, event):
         """
@@ -288,6 +366,235 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                     foreground=foreground,
                 )
 
+    def tr(self, text):
+        """Translate one canonical UI string to the currently selected language."""
+        return translate_text(text, self.current_language)
+
+    def trf(self, text, **values):
+        """Translate a format template and substitute values afterwards."""
+        return self.tr(text).format(**values)
+
+    def _capture_portuguese_help(self):
+        """Store the original PT-PT Help text and tag ranges exactly as built."""
+        if not hasattr(self, "help_text"):
+            return
+        try:
+            self._help_pt_text = self.help_text.get("1.0", "end-1c")
+            ranges = {}
+            for tag in self.help_text.tag_names():
+                if tag == "sel":
+                    continue
+                tag_ranges = list(self.help_text.tag_ranges(tag))
+                ranges[tag] = [
+                    (str(tag_ranges[i]), str(tag_ranges[i + 1]))
+                    for i in range(0, len(tag_ranges), 2)
+                ]
+            self._help_pt_tag_ranges = ranges
+        except tk.TclError:
+            self._help_pt_text = ""
+            self._help_pt_tag_ranges = {}
+
+    def _render_help_language(self):
+        """Render Help in English or restore the original PT-PT text byte-for-byte."""
+        if not hasattr(self, "help_text"):
+            return
+        try:
+            self.help_text.configure(state="normal")
+            self.help_text.delete("1.0", "end")
+
+            if self.current_language == LANGUAGE_ENGLISH:
+                max_ui_frames_text = f"{MAX_UI_FRAMES:_}".replace("_", " ")
+                max_raw_lines_text = f"{MAX_RAW_TEXT_LINES:_}".replace("_", " ")
+                for tag, text in english_help_blocks(
+                    max_ui_frames_text,
+                    max_raw_lines_text,
+                    MIN_PENDING_REQUEST_TIMEOUT_SECONDS,
+                    MAX_PENDING_REQUEST_TIMEOUT_SECONDS,
+                    debug_sim=(debug_sim == 1),
+                ):
+                    self.help_text.insert("end", text, tag)
+            else:
+                self.help_text.insert("1.0", getattr(self, "_help_pt_text", ""))
+                for tag, ranges in getattr(self, "_help_pt_tag_ranges", {}).items():
+                    for start, end in ranges:
+                        self.help_text.tag_add(tag, start, end)
+
+            self.help_text.configure(state="disabled")
+            self.help_text.see("1.0")
+        except tk.TclError:
+            pass
+
+    def _translate_widget_tree(self):
+        """Translate static widget captions without changing widget geometry."""
+        stack = [self]
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(widget.winfo_children())
+            except tk.TclError:
+                continue
+
+            # Text widgets contain documents, not captions.
+            if isinstance(widget, tk.Text):
+                continue
+
+            try:
+                keys = widget.keys()
+            except Exception:
+                keys = ()
+            if "text" in keys:
+                try:
+                    current = widget.cget("text")
+                    if current:
+                        widget.configure(text=self.tr(current))
+                except (tk.TclError, TypeError):
+                    pass
+
+            if isinstance(widget, ttk.Notebook):
+                try:
+                    for tab_id in widget.tabs():
+                        current = widget.tab(tab_id, "text")
+                        widget.tab(tab_id, text=self.tr(current))
+                except tk.TclError:
+                    pass
+
+    def _translate_traffic_context_menu(self):
+        menu = getattr(self, "traffic_context_menu", None)
+        if menu is None:
+            return
+        labels = (
+            (0, "Copiar Raw Hex"),
+            (1, "Copiar frame descodificado"),
+            (3, "Filtrar por este Slave"),
+            (4, "Filtrar por este FC"),
+            (5, "Mostrar apenas esta transação"),
+            (6, "Limpar filtro de transação"),
+        )
+        for index, canonical in labels:
+            try:
+                menu.entryconfigure(index, label=self.tr(canonical))
+            except tk.TclError:
+                pass
+
+    def _apply_table_language(self):
+        """Refresh headings and filter values that are not normal widget captions."""
+        if hasattr(self, "advanced_filter_type_combo"):
+            current = canonical_ui_text(self.advanced_filter_type_var.get())
+            canonical_values = (
+                "Todos", "Requests", "Responses", "Exceptions",
+                "CRC errors", "Timeouts", "RAW",
+            )
+            self.advanced_filter_type_combo.configure(
+                values=tuple(self.tr(v) for v in canonical_values)
+            )
+            self.advanced_filter_type_var.set(self.tr(current))
+
+        if hasattr(self, "time_order_var"):
+            canonical_order = canonical_ui_text(self.time_order_var.get())
+            self.time_order_var.set(self.tr(canonical_order))
+
+        if hasattr(self, "tree") and hasattr(self, "tree_headings"):
+            canonical_headings = {
+                "time": "Hora ↓" if self.time_order_descending() else "Hora ↑",
+                "delta": "Δt (ms)",
+                "response": "Resp. (ms)",
+                "channel": "COM",
+                "type": "Tipo",
+                "slave": canonical_ui_text(self.tree_headings.get("slave", "Slave ▾")),
+                "fc": "FC",
+                "details": "Detalhes",
+                "crc": "CRC",
+            }
+            for col, canonical in canonical_headings.items():
+                translated = self.tr(canonical)
+                self.tree_headings[col] = translated
+                try:
+                    self.tree.heading(col, text=translated)
+                except tk.TclError:
+                    pass
+
+        if hasattr(self, "discovery_tree"):
+            canonical = {
+                "slave": "Slave",
+                "baud": "Baud",
+                "config": "Config.",
+                "fc": "FC",
+                "result": "Resultado",
+                "resp": "Resp. (ms)",
+                "device_id": "Device Identification",
+                "raw": "Raw Hex",
+            }
+            for col, value in canonical.items():
+                try:
+                    self.discovery_tree.heading(col, text=self.tr(value))
+                except tk.TclError:
+                    pass
+
+    def apply_language(self, save=True):
+        """Apply the selected language immediately to the complete UI."""
+        selected = getattr(self, "language_var", None)
+        if selected is not None:
+            self.current_language = normalize_language(selected.get())
+            if selected.get() != self.current_language:
+                selected.set(self.current_language)
+
+        self._translate_widget_tree()
+        self._apply_table_language()
+        self._translate_traffic_context_menu()
+        self._render_help_language()
+
+        # Rebuild dynamic captions/values in the selected language.
+        try:
+            self.update_mode_ui()
+            self.update_com_status()
+            self.update_stats_labels()
+            self.rebuild_slave_filter_menu()
+            self.update_slave_heading()
+            self.update_frame_inspector(self.selected_record())
+            self.update_discovery_estimate()
+        except (AttributeError, tk.TclError):
+            pass
+
+        # Translate idle/current status variables without altering state.
+        for name in ("status_var", "discovery_status_var", "discovery_found_var"):
+            var = getattr(self, name, None)
+            if var is not None:
+                try:
+                    var.set(translate_runtime_text(var.get(), self.current_language))
+                except tk.TclError:
+                    pass
+
+        # Refresh translated row contents without allowing the language change
+        # itself to alter table/card geometry.  Column widths are restored after
+        # rendering; normal viewport resizing and new traffic may still use the
+        # existing responsive/autofit behaviour.
+        traffic_widths = {}
+        discovery_widths = {}
+        try:
+            if hasattr(self, "tree"):
+                traffic_widths = {
+                    col: int(self.tree.column(col, "width"))
+                    for col in self.tree["columns"]
+                }
+            if hasattr(self, "discovery_tree"):
+                discovery_widths = {
+                    col: int(self.discovery_tree.column(col, "width"))
+                    for col in self.discovery_tree["columns"]
+                }
+            self.render_filtered_view()
+            for col, width in traffic_widths.items():
+                self.tree.column(col, width=width)
+            for col, width in discovery_widths.items():
+                self.discovery_tree.column(col, width=width)
+        except (AttributeError, tk.TclError):
+            pass
+
+        if save:
+            self.save_current_ui_settings()
+
+    def on_language_changed(self, _event=None):
+        self.apply_language(save=True)
+
     def toggle_dark_mode(self):
         """
         Switch Light/Dark colours only.
@@ -376,6 +683,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
             payload = {
                 "dark_mode": bool(self.dark_mode_var.get()),
+                "language": normalize_language(self.current_language),
                 "last_main_tab": self._current_main_tab_name(),
                 "sniffer": {
                     "physical_mode": self.mode_var.get(),
@@ -749,6 +1057,26 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             height=22,
         )
         self.dark_mode_switch.grid(row=0, column=1, sticky="e")
+
+        self.language_label = ttk.Label(
+            self.theme_overlay,
+            text="Linguagem",
+        )
+        self.language_label.grid(
+            row=0, column=2, sticky="e", padx=(18, 6)
+        )
+        self.language_var = tk.StringVar(value=self.current_language)
+        self.language_combo = ttk.Combobox(
+            self.theme_overlay,
+            textvariable=self.language_var,
+            values=LANGUAGE_CHOICES,
+            state="readonly",
+            width=10,
+        )
+        self.language_combo.grid(row=0, column=3, sticky="e")
+        self.language_combo.bind(
+            "<<ComboboxSelected>>", self.on_language_changed
+        )
         self.theme_overlay.lift()
 
         # ==================================================================
@@ -757,8 +1085,11 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         # ==================================================================
         top_area = ttk.Frame(self.sniffer_page)
         top_area.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
-        top_area.columnconfigure(0, weight=3)
-        top_area.columnconfigure(1, weight=2)
+        # Keep the 3:2 workspace split independent of translated text widths.
+        # Without a shared uniform group Tk first honours each child widget's
+        # requested width, so changing language moves the two main rectangles.
+        top_area.columnconfigure(0, weight=3, uniform="top_workspace")
+        top_area.columnconfigure(1, weight=2, uniform="top_workspace")
         # The left Configuração card defines the natural top-workspace height.
         # The right stack stretches to exactly the same top/bottom limits.
         top_area.rowconfigure(0, weight=1)
@@ -956,8 +1287,8 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         # Same top coordinate as Configuração; only the gap below Controlos
         # separates it from Estatísticas.
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        actions.columnconfigure(0, weight=1)
-        actions.columnconfigure(1, weight=1)
+        actions.columnconfigure(0, weight=1, uniform="action_columns")
+        actions.columnconfigure(1, weight=1, uniform="action_columns")
 
         self.start_btn = ttk.Button(
             actions, text="Iniciar Captura", command=self.start_capture,
@@ -1093,6 +1424,9 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             pady=(4, 3),
         )
         filter_bar.columnconfigure(8, weight=1)
+        # "Pesquisa" is wider than "Search". Keep its canonical PT cell width
+        # reserved so the search Entry never moves when language changes.
+        filter_bar.columnconfigure(7, minsize=65)
 
         ttk.Label(filter_bar, text="Filtros").grid(
             row=0, column=0, sticky="w", padx=(2, 6)
@@ -1115,6 +1449,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             ),
         )
         type_filter.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self.advanced_filter_type_combo = type_filter
         type_filter.bind(
             "<<ComboboxSelected>>",
             lambda _e: self.render_filtered_view(),

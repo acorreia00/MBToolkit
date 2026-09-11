@@ -26,6 +26,7 @@ from mb_diagnostics import (
     decoded_record_text,
     inspector_values,
 )
+from mb_i18n import canonical_ui_text, translate_details
 
 class ViewMixin:
     """Methods for rendering, filtering, statistics and logging."""
@@ -35,12 +36,12 @@ class ViewMixin:
         self.update_stats_labels()
 
     def update_stats_labels(self):
-        self.stat_requests_var.set(f"Pedidos: {self.metrics.requests}")
-        self.stat_responses_var.set(f"Respostas: {self.metrics.responses}")
-        self.stat_pending_var.set(f"Pendentes: {self.metrics.pending_count()}")
+        self.stat_requests_var.set(f"{self.tr('Pedidos')}: {self.metrics.requests}")
+        self.stat_responses_var.set(f"{self.tr('Respostas')}: {self.metrics.responses}")
+        self.stat_pending_var.set(f"{self.tr('Pendentes')}: {self.metrics.pending_count()}")
         self.stat_timeouts_var.set(f"Timeouts: {self.metrics.timeouts}")
-        self.stat_crc_var.set(f"Erros de CRC: {self.metrics.crc_errors}")
-        self.stat_exceptions_var.set(f"Exceções: {self.metrics.exceptions}")
+        self.stat_crc_var.set(f"{self.tr('Erros de CRC')}: {self.metrics.crc_errors}")
+        self.stat_exceptions_var.set(f"{self.tr('Exceções')}: {self.metrics.exceptions}")
         self.stat_raw_var.set(f"RAW: {self.metrics.raw}")
 
         try:
@@ -89,7 +90,7 @@ class ViewMixin:
             mappings["health_slowest_var"] = "—"
         else:
             mappings["health_slowest_var"] = (
-                f"Slave {slowest_slave} — média {summary['slowest_avg_ms']:.1f} ms"
+                (f"Slave {slowest_slave} — average {summary['slowest_avg_ms']:.1f} ms" if self.current_language == "English" else f"Slave {slowest_slave} — média {summary['slowest_avg_ms']:.1f} ms")
             )
 
         for attr, value in mappings.items():
@@ -151,7 +152,7 @@ class ViewMixin:
                 pass
             self._advanced_filter_after_id = None
 
-        self.advanced_filter_type_var.set("Todos")
+        self.advanced_filter_type_var.set(self.tr("Todos"))
         self.advanced_filter_fc_var.set("")
         self.advanced_filter_response_ms_var.set("")
         self.advanced_filter_text_var.set("")
@@ -185,7 +186,7 @@ class ViewMixin:
             if record.get("seq") not in transaction_filter:
                 return False
 
-        kind = self.advanced_filter_type_var.get()
+        kind = canonical_ui_text(self.advanced_filter_type_var.get())
         row_type = str(record.get("type", ""))
 
         if kind == "Requests" and row_type != "REQUEST":
@@ -363,6 +364,7 @@ class ViewMixin:
         values = inspector_values(
             record,
             successful_request=successful_request,
+            language=self.current_language,
         )
         for key, var in self.inspector_vars.items():
             if key in values:
@@ -385,11 +387,11 @@ class ViewMixin:
         if getattr(self, "inspector_collapsed", False):
             self.inspector_body.grid()
             self.inspector_collapsed = False
-            self.inspector_toggle_btn.configure(text="Recolher")
+            self.inspector_toggle_btn.configure(text=self.tr("Recolher"))
         else:
             self.inspector_body.grid_remove()
             self.inspector_collapsed = True
-            self.inspector_toggle_btn.configure(text="Expandir")
+            self.inspector_toggle_btn.configure(text=self.tr("Expandir"))
 
         scheduler = getattr(self, "_schedule_bus_health_layout_sync", None)
         if callable(scheduler):
@@ -419,6 +421,7 @@ class ViewMixin:
                 decoded_record_text(
                     record,
                     successful_request=successful_request,
+                    language=self.current_language,
                 )
             )
 
@@ -474,7 +477,7 @@ class ViewMixin:
             var.set(True)
         self.update_slave_heading()
 
-        self.advanced_filter_type_var.set("Todos")
+        self.advanced_filter_type_var.set(self.tr("Todos"))
         self.advanced_filter_fc_var.set("")
         self.advanced_filter_response_ms_var.set("")
         self.advanced_filter_text_var.set("")
@@ -511,8 +514,8 @@ class ViewMixin:
         if not records:
             if path is None:
                 messagebox.showinfo(
-                    "Exportar CSV",
-                    "Não existem frames na sessão atual para exportar.",
+                    self.tr("Exportar CSV"),
+                    ("There are no frames in the current session to export." if self.current_language == "English" else "Não existem frames na sessão atual para exportar."),
                 )
             return None
 
@@ -521,10 +524,10 @@ class ViewMixin:
                 "MBSniffer_session_%Y%m%d_%H%M%S.csv"
             )
             path = filedialog.asksaveasfilename(
-                title="Exportar sessão para CSV",
+                title=self.tr("Exportar sessão para CSV"),
                 defaultextension=".csv",
                 initialfile=filename,
-                filetypes=[("CSV", "*.csv"), ("Todos os ficheiros", "*.*")],
+                filetypes=[("CSV", "*.csv"), (self.tr("Todos os ficheiros"), "*.*")],
             )
             if not path:
                 return None
@@ -554,7 +557,7 @@ class ViewMixin:
                 writer.writeheader()
 
                 for record in records:
-                    inspector = inspector_values(record)
+                    inspector = inspector_values(record, language=self.current_language)
                     byte_count_text = inspector["byte_count"].split(
                         ":", 1
                     )[-1].strip()
@@ -566,7 +569,7 @@ class ViewMixin:
                         "Type": record.get("type", ""),
                         "Slave": record.get("slave", ""),
                         "FC": record.get("fc", ""),
-                        "Details": record.get("details", ""),
+                        "Details": translate_details(record.get("details", ""), self.current_language),
                         "CRC": record.get("crc", ""),
                         "Raw": record.get("raw", ""),
                         "PDU Address": (
@@ -595,8 +598,8 @@ class ViewMixin:
             if interactive:
                 try:
                     messagebox.showinfo(
-                        "Exportar CSV",
-                        f"Sessão exportada para:\n\n{path}",
+                        self.tr("Exportar CSV"),
+                        ((f"Session exported to:\n\n{path}") if self.current_language == "English" else f"Sessão exportada para:\n\n{path}"),
                     )
                 except tk.TclError:
                     pass
@@ -604,8 +607,8 @@ class ViewMixin:
 
         except OSError as exc:
             messagebox.showerror(
-                "Exportar CSV",
-                f"Não foi possível guardar o CSV:\n\n{exc}",
+                self.tr("Exportar CSV"),
+                ((f"Could not save the CSV:\n\n{exc}") if self.current_language == "English" else f"Não foi possível guardar o CSV:\n\n{exc}"),
             )
             return None
 
@@ -618,7 +621,7 @@ class ViewMixin:
             "type": record.get("type", ""),
             "slave": record.get("slave", ""),
             "fc": record.get("fc", ""),
-            "details": record.get("details", ""),
+            "details": translate_details(record.get("details", ""), self.current_language),
             "crc": record.get("crc", ""),
         }
 
@@ -853,7 +856,7 @@ class ViewMixin:
             - self.tree_column_padding_px
         )
         wrapped = self.wrap_text_to_pixels(
-            record.get("details", ""),
+            translate_details(record.get("details", ""), self.current_language),
             content_width
         )
 
@@ -1020,11 +1023,11 @@ class ViewMixin:
         self.slave_filter_menu.delete(0, "end")
 
         self.slave_filter_menu.add_command(
-            label="Todos",
+            label=self.tr("Todos"),
             command=self.select_all_slaves
         )
         self.slave_filter_menu.add_command(
-            label="Nenhum",
+            label=self.tr("Nenhum"),
             command=self.select_no_slaves
         )
 
@@ -1039,7 +1042,7 @@ class ViewMixin:
         else:
             self.slave_filter_menu.add_separator()
             self.slave_filter_menu.add_command(
-                label="Nenhum slave detetado",
+                label=self.tr("Nenhum slave detetado"),
                 state="disabled"
             )
 
@@ -1053,7 +1056,7 @@ class ViewMixin:
                 slave for slave, var in self.slave_filter_vars.items()
                 if var.get()
             ]
-            label = "Slave (Filtro) ▾" if selected else "Slave (Nenhum) ▾"
+            label = (self.tr("Slave (Filtro) ▾") if selected else self.tr("Slave (Nenhum) ▾"))
 
         self.tree_headings["slave"] = label
         self.tree.heading(
@@ -1137,10 +1140,10 @@ class ViewMixin:
         return str(record.get("slave", "")) in selected
 
     def time_order_descending(self):
-        return self.time_order_var.get().startswith("Decrescente")
+        return canonical_ui_text(self.time_order_var.get()).startswith("Decrescente")
 
     def on_time_order_changed(self):
-        label = "Hora ↓" if self.time_order_descending() else "Hora ↑"
+        label = self.tr("Hora ↓") if self.time_order_descending() else self.tr("Hora ↑")
         self.tree_headings["time"] = label
         self.tree.heading(
             "time",
@@ -1152,9 +1155,9 @@ class ViewMixin:
 
     def toggle_time_order(self):
         if self.time_order_descending():
-            self.time_order_var.set("Crescente — antigo → recente")
+            self.time_order_var.set(self.tr("Crescente — antigo → recente"))
         else:
-            self.time_order_var.set("Decrescente — recente → antigo")
+            self.time_order_var.set(self.tr("Decrescente — recente → antigo"))
         self.on_time_order_changed()
 
     def records_for_display(self):
@@ -1191,7 +1194,7 @@ class ViewMixin:
             f"{response_field}"
             f"{record['channel']:<6} {record['type']:<10} "
             f"Slave={record['slave'] or '-':<3} FC={record['fc'] or '-':<2} "
-            f"CRC={record['crc']:<5} | {record['raw']} | {record['details']}\n"
+            f"CRC={record['crc']:<5} | {record['raw']} | {translate_details(record['details'], self.current_language)}\n"
         )
 
     def raw_separator_width_chars(self, raw_lines=None):
@@ -1638,7 +1641,7 @@ class ViewMixin:
     def finish_capture_ui(self):
         self.busy = False
         self.capture_active = False
-        self.status_var.set("● Parado")
+        self.status_var.set(self.tr("● Parado"))
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.restart_btn.configure(state="normal")
@@ -1700,10 +1703,9 @@ class ViewMixin:
             self.log_file = None
             self.log_path = None
             messagebox.showerror(
-                "Erro ao criar log",
-                "Foi detetado tráfego, mas não foi possível criar o ficheiro de log em:\n\n"
-                f"{get_logs_folder()}\n\n"
-                f"{exc}"
+                ("Error creating log" if self.current_language == "English" else "Erro ao criar log"),
+                (("Traffic was detected, but the log file could not be created at:\n\n") if self.current_language == "English" else "Foi detetado tráfego, mas não foi possível criar o ficheiro de log em:\n\n")
+                + f"{get_logs_folder()}\n\n{exc}"
             )
             return False
 
@@ -1751,7 +1753,7 @@ class ViewMixin:
             else:
                 subprocess.Popen(["xdg-open", str(folder)])
         except Exception as exc:
-            messagebox.showerror("Abrir pasta", str(exc))
+            messagebox.showerror(self.tr("Abrir pasta"), str(exc))
 
     def clear_view(self):
         for item in self.tree.get_children():
@@ -1776,7 +1778,7 @@ class ViewMixin:
         self._transaction_filter_seqs = None
         self._successful_request_seqs.clear()
         if hasattr(self, "advanced_filter_type_var"):
-            self.advanced_filter_type_var.set("Todos")
+            self.advanced_filter_type_var.set(self.tr("Todos"))
             self.advanced_filter_fc_var.set("")
             self.advanced_filter_response_ms_var.set("")
             self.advanced_filter_text_var.set("")
@@ -1784,8 +1786,8 @@ class ViewMixin:
         if hasattr(self, "bus_activity_var"):
             self.bus_activity_var.set("BUS ○")
 
-        self.time_order_var.set("Crescente — antigo → recente")
-        self.tree_headings["time"] = "Hora ↑"
+        self.time_order_var.set(self.tr("Crescente — antigo → recente"))
+        self.tree_headings["time"] = self.tr("Hora ↑")
         self.tree.heading(
             "time",
             text=self.tree_headings["time"],

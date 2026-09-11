@@ -47,15 +47,15 @@ class CaptureMixin:
 
         if dual:
             self.mode_help_var.set(
-                "RS232 dual RX: COM A escuta uma direção; COM B escuta a direção oposta."
+                self.tr("RS232 dual RX: COM A escuta uma direção; COM B escuta a direção oposta.")
             )
         elif mode == "RS232 single RX":
             self.mode_help_var.set(
-                "RS232 single RX: uma COM escuta apenas uma direção da ligação RS232."
+                self.tr("RS232 single RX: uma COM escuta apenas uma direção da ligação RS232.")
             )
         else:
             self.mode_help_var.set(
-                "RS485 2-wire: uma COM consegue observar pedidos e respostas no mesmo par diferencial."
+                self.tr("RS485 2-wire: uma COM consegue observar pedidos e respostas no mesmo par diferencial.")
             )
 
         self.update_com_status()
@@ -116,21 +116,21 @@ class CaptureMixin:
 
     def port_status_text(self, label, port, enabled=True):
         if not enabled:
-            return f"{label} - Não Utilizada"
+            return f"{label} - {self.tr('Não Utilizada')}"
         if not port:
-            return f"{label} - Não selecionada"
+            return f"{label} - {self.tr('Não selecionada')}"
 
         ser = self.serial_by_port.get(port)
         if ser is not None:
             try:
                 if ser.is_open:
-                    return f"{label} - Aberta"
+                    return f"{label} - {self.tr('Aberta')}"
             except Exception:
                 pass
 
         if port in self.detected_ports():
-            return f"{label} - Detetada"
-        return f"{label} - Não detetada"
+            return f"{label} - {self.tr('Detetada')}"
+        return f"{label} - {self.tr('Não detetada')}"
 
     def update_com_status(self):
         """
@@ -174,15 +174,15 @@ class CaptureMixin:
         port_b = self.port_b_var.get().strip()
 
         if not port_a:
-            raise ValueError("Seleciona a COM A.")
+            raise ValueError("Select COM A." if self.current_language == "English" else "Seleciona a COM A.")
 
         plan = [("BUS" if mode == "RS485 2-wire" else "A→B", port_a)]
 
         if mode == "RS232 dual RX":
             if not port_b:
-                raise ValueError("Seleciona também a COM B.")
+                raise ValueError("Select COM B as well." if self.current_language == "English" else "Seleciona também a COM B.")
             if port_a == port_b:
-                raise ValueError("COM A e COM B têm de ser diferentes.")
+                raise ValueError("COM A and COM B must be different." if self.current_language == "English" else "COM A e COM B têm de ser diferentes.")
             plan.append(("B→A", port_b))
 
         return plan
@@ -236,7 +236,7 @@ class CaptureMixin:
 
         serial, _ = self.get_serial_modules()
         if serial is None:
-            messagebox.showerror("pyserial em falta", "pyserial não está instalado.")
+            messagebox.showerror(self.tr("pyserial em falta"), "pyserial is not installed." if self.current_language == "English" else "pyserial não está instalado.")
             return
 
         try:
@@ -244,7 +244,7 @@ class CaptureMixin:
             gap_ms = self.calculated_gap_ms()
             self.selected_port_plan()
         except Exception as exc:
-            messagebox.showerror("Porta COM", str(exc))
+            messagebox.showerror(self.tr("Porta COM"), str(exc))
             return
 
         self.restart_in_progress = True
@@ -257,7 +257,7 @@ class CaptureMixin:
                 self.install_opened_ports(opened)
                 self.update_idletasks()
             except Exception as exc:
-                messagebox.showerror("Reiniciar COM", f"Não foi possível reiniciar a porta COM:\n\n{exc}")
+                messagebox.showerror(self.tr("Reiniciar COM"), (f"Could not restart the COM port:\n\n{exc}" if self.current_language == "English" else f"Não foi possível reiniciar a porta COM:\n\n{exc}"))
             finally:
                 for _, ser_obj in opened:
                     try:
@@ -272,7 +272,7 @@ class CaptureMixin:
             return
 
         # Active capture: stop only the current serial-reader generation.
-        self.status_var.set("● A reiniciar COM")
+        self.status_var.set(self.tr("● A reiniciar COM"))
         self.reader_generation += 1
         self.stop_event.set()
 
@@ -303,8 +303,8 @@ class CaptureMixin:
             self.finish_capture_ui()
             self.update_com_status()
             messagebox.showerror(
-                "Reiniciar COM",
-                f"Não foi possível reabrir a porta COM. A captura foi parada.\n\n{exc}"
+                self.tr("Reiniciar COM"),
+                (f"Could not reopen the COM port. Capture was stopped.\n\n{exc}" if self.current_language == "English" else f"Não foi possível reabrir a porta COM. A captura foi parada.\n\n{exc}")
             )
             return
 
@@ -314,7 +314,7 @@ class CaptureMixin:
         self.queue_log_note(
             f"# COM restart: {datetime.now().isoformat(timespec='milliseconds')}\n"
         )
-        self.status_var.set("● A capturar")
+        self.status_var.set(self.tr("● A capturar"))
         self.restart_in_progress = False
         self.restart_btn.configure(state="normal")
         self.update_com_status()
@@ -328,7 +328,7 @@ class CaptureMixin:
         try:
             value = float(self.pending_timeout_var.get().strip().replace(",", "."))
         except ValueError:
-            raise ValueError("Pending timeout inválido.")
+            raise ValueError("Invalid Pending timeout." if self.current_language == "English" else "Pending timeout inválido.")
 
         if not (
             MIN_PENDING_REQUEST_TIMEOUT_SECONDS
@@ -336,9 +336,13 @@ class CaptureMixin:
             <= MAX_PENDING_REQUEST_TIMEOUT_SECONDS
         ):
             raise ValueError(
-                "Pending timeout deve estar entre "
-                f"{MIN_PENDING_REQUEST_TIMEOUT_SECONDS:g} e "
-                f"{MAX_PENDING_REQUEST_TIMEOUT_SECONDS:g} segundos."
+                (
+                    f"Pending timeout must be between {MIN_PENDING_REQUEST_TIMEOUT_SECONDS:g} and {MAX_PENDING_REQUEST_TIMEOUT_SECONDS:g} seconds."
+                    if self.current_language == "English"
+                    else "Pending timeout deve estar entre "
+                    f"{MIN_PENDING_REQUEST_TIMEOUT_SECONDS:g} e "
+                    f"{MAX_PENDING_REQUEST_TIMEOUT_SECONDS:g} segundos."
+                )
             )
 
         return value
@@ -347,7 +351,7 @@ class CaptureMixin:
         if self.gap_mode_var.get() == "Manual":
             value = float(self.gap_ms_var.get().replace(",", "."))
             if value <= 0:
-                raise ValueError("Frame gap manual inválido.")
+                raise ValueError("Invalid manual Frame gap." if self.current_language == "English" else "Frame gap manual inválido.")
             return value
 
         baud = int(self.baud_var.get())
@@ -422,8 +426,8 @@ class CaptureMixin:
         serial, _ = self.get_serial_modules()
         if serial is None:
             messagebox.showerror(
-                "pyserial em falta",
-                "pyserial não está instalado.\n\nO build_exe.bat inclui-o automaticamente no EXE."
+                self.tr("pyserial em falta"),
+                ("pyserial is not installed.\n\nbuild_exe.bat includes it automatically in the EXE." if self.current_language == "English" else "pyserial não está instalado.\n\nO build_exe.bat inclui-o automaticamente no EXE.")
             )
             return
 
@@ -437,7 +441,7 @@ class CaptureMixin:
             config = self.serial_config(serial)
             opened = self.open_selected_ports(serial, config)
         except Exception as exc:
-            messagebox.showerror("Erro ao abrir porta", str(exc))
+            messagebox.showerror(self.tr("Erro ao abrir porta"), str(exc))
             self.update_com_status()
             return
 
@@ -465,7 +469,7 @@ class CaptureMixin:
         )
         self.prepare_log_session("MBSniffer", capture_started, log_header)
 
-        self.status_var.set("● A capturar")
+        self.status_var.set(self.tr("● A capturar"))
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.restart_btn.configure(state="normal")
@@ -536,7 +540,7 @@ class CaptureMixin:
 
     def stop_capture(self):
         if self.capture_active:
-            self.status_var.set("● A parar")
+            self.status_var.set(self.tr("● A parar"))
         self.stop_event.set()
 
     def run_simulation(self):
@@ -549,7 +553,7 @@ class CaptureMixin:
         try:
             pending_timeout_s = self.selected_pending_timeout_seconds()
         except Exception as exc:
-            messagebox.showerror("Configuração inválida", str(exc))
+            messagebox.showerror(self.tr("Configuração inválida"), str(exc))
             return
 
         self.busy = True
@@ -559,7 +563,7 @@ class CaptureMixin:
         # Simulation is GUI-only. Never create or write a .txt log.
         self.close_log()
 
-        self.status_var.set("● A simular")
+        self.status_var.set(self.tr("● A simular"))
         self.start_btn.configure(state="disabled")
         self.restart_btn.configure(state="disabled")
         self.set_simulation_button_state("disabled")
@@ -679,7 +683,7 @@ class CaptureMixin:
                     self.stop_event.set()
                     self.update_com_status()
                     messagebox.showerror(
-                        "Erro de captura", f"{channel}: {error_text}"
+                        self.tr("Erro de captura"), f"{channel}: {error_text}"
                     )
 
                 elif event == "reader_stopped":
@@ -698,7 +702,7 @@ class CaptureMixin:
 
                 elif event == "simulation_done":
                     self.busy = False
-                    self.status_var.set("● Simulação concluída")
+                    self.status_var.set(self.tr("● Simulação concluída"))
                     self.start_btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
                     self.restart_btn.configure(state="normal")
@@ -709,7 +713,7 @@ class CaptureMixin:
 
                 elif event == "simulation_error":
                     self.busy = False
-                    self.status_var.set("● Erro na simulação")
+                    self.status_var.set(self.tr("● Erro na simulação"))
                     self.start_btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
                     self.restart_btn.configure(state="normal")
@@ -717,7 +721,7 @@ class CaptureMixin:
                     self.set_sniffer_refresh_state("normal")
                     self.close_log()
                     self.update_com_status()
-                    messagebox.showerror("Erro na simulação", str(payload))
+                    messagebox.showerror(self.tr("Erro na simulação"), str(payload))
 
                 elif event == "discovery_status":
                     self.discovery_status_var.set(str(payload))
@@ -769,10 +773,9 @@ class CaptureMixin:
                 self._process_queue_error_shown = True
                 try:
                     messagebox.showerror(
-                        "Erro interno",
-                        "Ocorreu um erro ao processar eventos da interface. "
-                        "O processamento continuará.\n\n"
-                        f"{type(exc).__name__}: {exc}"
+                        self.tr("Erro interno"),
+                        (("An error occurred while processing interface events. Processing will continue.\n\n") if self.current_language == "English" else "Ocorreu um erro ao processar eventos da interface. O processamento continuará.\n\n")
+                        + f"{type(exc).__name__}: {exc}"
                     )
                 except Exception:
                     pass

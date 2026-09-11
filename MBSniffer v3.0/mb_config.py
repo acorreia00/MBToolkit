@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "MBSniffer"
-APP_VERSION = "2.9"
+APP_VERSION = "3.0"
 
 # Simulação:
 #   0 = simulação inativa (o botão não aparece no GUI)
@@ -195,6 +195,9 @@ def load_ui_settings() -> dict:
     if isinstance(data.get("dark_mode"), bool):
         result["dark_mode"] = data["dark_mode"]
 
+    if data.get("language") in ("Português", "English"):
+        result["language"] = data["language"]
+
     if data.get("last_main_tab") in ("Sniffer", "Bus Slave Finder"):
         result["last_main_tab"] = data["last_main_tab"]
 
@@ -359,7 +362,7 @@ def get_application_directory() -> Path:
 
     - PyInstaller EXE: directory containing MBSniffer.exe.
     - Packaged Python/BAT mode: directory containing the root MBSniffer.bat.
-      The Python sources live inside the versioned child folder, e.g. ``MBSniffer v2.9``.
+      The Python sources live inside the versioned child folder, e.g. ``MBSniffer v3.0``.
     - Development Python mode: directory containing this module.
     """
     try:

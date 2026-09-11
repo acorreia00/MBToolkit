@@ -3,6 +3,7 @@
 
 from mb_config import MODBUS_EXCEPTION_CODES, SLOW_RESPONSE_THRESHOLD_MS
 from mb_protocol import crc16_modbus
+from mb_i18n import LANGUAGE_PORTUGUESE, translate_details, translate_text
 
 
 FUNCTION_NAMES = {
@@ -40,11 +41,11 @@ def fc_number(record):
     return value
 
 
-def function_label(record):
+def function_label(record, language=LANGUAGE_PORTUGUESE):
     fc = fc_number(record)
     if fc is None:
         return "—"
-    name = FUNCTION_NAMES.get(fc, "Desconhecida/outra")
+    name = FUNCTION_NAMES.get(fc, translate_text("Desconhecida/outra", language))
     return f"0x{fc:02X} — {name}"
 
 
@@ -61,7 +62,7 @@ def crc_fields(record):
     return received, calculated, ("OK" if received == calculated else "ERROR")
 
 
-def response_payload(record):
+def response_payload(record, language=LANGUAGE_PORTUGUESE):
     """Return (byte_count, data_hex, decoded_data) where available."""
     frame = raw_hex_to_bytes(record.get("raw"))
     if len(frame) < 3:
@@ -89,7 +90,7 @@ def response_payload(record):
                 (data[i] << 8) | data[i + 1]
                 for i in range(0, len(data), 2)
             ]
-            decoded = f"Registos={regs}"
+            decoded = translate_details(f"Registos={regs}", language)
         return byte_count, data_hex, decoded
 
     if kind == "REQUEST" and fc in (15, 16) and len(frame) >= 9:
@@ -143,7 +144,7 @@ RESULT_LABELS = {
 }
 
 
-def result_info(record, successful_request=False):
+def result_info(record, successful_request=False, language=LANGUAGE_PORTUGUESE):
     """
     Return (result_key, human_label, colour_name) for one traffic record.
 
@@ -152,7 +153,7 @@ def result_info(record, successful_request=False):
     "Realçar resultados".
     """
     if not record:
-        return "neutral", "—", "Neutro"
+        return "neutral", "—", translate_text("Neutro", language)
 
     kind = anomaly_kind(record, SLOW_RESPONSE_THRESHOLD_MS)
     if kind:
@@ -161,7 +162,7 @@ def result_info(record, successful_request=False):
             # Preserve the exact parser state in the Inspector.
             row_type = str(record.get("type", "RAW") or "RAW")
             label = row_type
-        return kind, label, colour
+        return kind, translate_text(label, language), translate_text(colour, language)
 
     row_type = str(record.get("type", ""))
 
@@ -171,35 +172,35 @@ def result_info(record, successful_request=False):
         and record.get("matched")
     ):
         label, colour = RESULT_LABELS["success"]
-        return "success", label, colour
+        return "success", translate_text(label, language), translate_text(colour, language)
 
     if row_type == "REQUEST":
         if successful_request and not record.get("timed_out"):
             label, colour = RESULT_LABELS["success"]
-            return "success", label, colour
+            return "success", translate_text(label, language), translate_text(colour, language)
 
         label, colour = RESULT_LABELS["pending"]
-        return "pending", label, colour
+        return "pending", translate_text(label, language), translate_text(colour, language)
 
     label, colour = RESULT_LABELS["neutral"]
-    return "neutral", label, colour
+    return "neutral", translate_text(label, language), translate_text(colour, language)
 
 
-def inspector_values(record, successful_request=False):
+def inspector_values(record, successful_request=False, language=LANGUAGE_PORTUGUESE):
     if not record:
         return {
             "slave": "Slave: —",
-            "type": "Tipo: —",
+            "type": f"{translate_text('Tipo', language)}: —",
             "function": "Function: —",
             "response": "Resp.: —",
-            "result": "Resultado: —",
+            "result": f"{translate_text('Resultado', language)}: —",
             "result_key": "neutral",
             "pdu": "PDU Address: —",
             "one_based": "1-based: —",
             "qty": "Qty: —",
             "byte_count": "ByteCount: —",
             "crc": "CRC: —",
-            "data": "Dados: —",
+            "data": f"{translate_text('Dados', language)}: —",
             "raw": "",
         }
 
@@ -208,10 +209,10 @@ def inspector_values(record, successful_request=False):
         crc_text = f"CRC: {crc_state or '—'}"
     else:
         crc_text = (
-            f"CRC: recebido 0x{received:04X} / calculado 0x{calculated:04X} — {crc_state}"
+            (f"CRC: received 0x{received:04X} / calculated 0x{calculated:04X} — {crc_state}" if language == "English" else f"CRC: recebido 0x{received:04X} / calculado 0x{calculated:04X} — {crc_state}")
         )
 
-    byte_count, data_hex, decoded = response_payload(record)
+    byte_count, data_hex, decoded = response_payload(record, language=language)
     payload = decoded or data_hex or str(record.get("details", "") or "—")
 
     response = str(record.get("response_text", "") or "")
@@ -222,29 +223,31 @@ def inspector_values(record, successful_request=False):
     result_key, result_label, _result_colour = result_info(
         record,
         successful_request=successful_request,
+        language=language,
     )
 
     return {
         "slave": f"Slave: {record.get('slave') or '—'}",
-        "type": f"Tipo: {record.get('type') or '—'}{timeout_suffix}",
-        "function": f"Function: {function_label(record)}",
+        "type": f"{translate_text('Tipo', language)}: {record.get('type') or '—'}{timeout_suffix}",
+        "function": f"Function: {function_label(record, language=language)}",
         "response": f"Resp.: {response or '—'}",
-        "result": f"Resultado: {result_label}",
+        "result": f"{translate_text('Resultado', language)}: {result_label}",
         "result_key": result_key,
         "pdu": f"PDU Address: {record.get('pdu_address') if record.get('pdu_address') is not None else '—'}",
         "one_based": f"1-based: {record.get('one_based') if record.get('one_based') is not None else '—'}",
         "qty": f"Qty: {record.get('qty') if record.get('qty') is not None else '—'}",
         "byte_count": f"ByteCount: {byte_count if byte_count is not None else '—'}",
         "crc": crc_text,
-        "data": f"Dados: {payload}",
+        "data": f"{translate_text('Dados', language)}: {translate_details(payload, language)}",
         "raw": str(record.get("raw", "") or ""),
     }
 
 
-def decoded_record_text(record, successful_request=False):
+def decoded_record_text(record, successful_request=False, language=LANGUAGE_PORTUGUESE):
     values = inspector_values(
         record,
         successful_request=successful_request,
+        language=language,
     )
     return "\n".join((
         values["slave"],

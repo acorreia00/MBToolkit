@@ -552,6 +552,7 @@ class SlaveFinderMixin:
         safety_cb.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
 
         options = ttk.LabelFrame(page, text="Configuração da pesquisa")
+        self._discovery_options_frame = options
         options.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
         options.columnconfigure(0, weight=1)
 
@@ -621,9 +622,11 @@ class SlaveFinderMixin:
 
         serial_frame = ttk.Frame(options)
         serial_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
-        serial_frame.columnconfigure(0, weight=1)
-        serial_frame.columnconfigure(1, weight=1)
-        serial_frame.columnconfigure(2, weight=1)
+        # Equal thirds independent of translated child captions.
+        for column in range(3):
+            serial_frame.columnconfigure(
+                column, weight=1, uniform="finder_serial_columns"
+            )
 
         parity_box = ttk.LabelFrame(serial_frame, text="Parity")
         parity_box.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
@@ -890,17 +893,18 @@ class SlaveFinderMixin:
         start = int(self.discovery_slave_start_var.get())
         end = int(self.discovery_slave_end_var.get())
         if not (1 <= start <= 247 and 1 <= end <= 247):
-            raise ValueError("Os Slave IDs têm de estar entre 1 e 247.")
+            raise ValueError("Slave IDs must be between 1 and 247." if self.current_language == "English" else "Os Slave IDs têm de estar entre 1 e 247.")
         if start > end:
-            raise ValueError("O Slave ID inicial não pode ser superior ao final.")
+            raise ValueError("The starting Slave ID cannot be greater than the ending Slave ID." if self.current_language == "English" else "O Slave ID inicial não pode ser superior ao final.")
         return list(range(start, end + 1))
 
     def selected_discovery_min_timeout_ms(self):
         value = float(self.discovery_min_timeout_var.get())
         if not (DISCOVERY_MIN_TIMEOUT_MS <= value <= DISCOVERY_MAX_TIMEOUT_MS):
             raise ValueError(
-                f"O timeout mínimo tem de estar entre {DISCOVERY_MIN_TIMEOUT_MS} e "
-                f"{DISCOVERY_MAX_TIMEOUT_MS} ms."
+                (f"The minimum timeout must be between {DISCOVERY_MIN_TIMEOUT_MS} and {DISCOVERY_MAX_TIMEOUT_MS} ms."
+                 if self.current_language == "English" else
+                 f"O timeout mínimo tem de estar entre {DISCOVERY_MIN_TIMEOUT_MS} e {DISCOVERY_MAX_TIMEOUT_MS} ms.")
             )
         return value
 
@@ -914,7 +918,7 @@ class SlaveFinderMixin:
             slaves = self.selected_discovery_slaves()
             minimum_timeout_ms = self.selected_discovery_min_timeout_ms()
         except Exception:
-            self.discovery_estimate_var.set("Máx. estimado: —")
+            self.discovery_estimate_var.set("Estimated max.: —" if self.current_language == "English" else "Máx. estimado: —")
             self.discovery_progress_text_var.set("0 / 0")
             return
 
@@ -950,10 +954,11 @@ class SlaveFinderMixin:
             suffix_parts.append("FC04 fallback")
         if identify_devices:
             suffix_parts.append("Device Identification")
-        suffix = f" (com {' + '.join(suffix_parts)})" if suffix_parts else ""
+        suffix = ((f" (with {' + '.join(suffix_parts)})" if self.current_language == "English" else f" (com {' + '.join(suffix_parts)})") if suffix_parts else "")
         self.discovery_estimate_var.set(
-            f"{len(configs)} config. × {len(slaves)} slaves — "
-            f"máx. estimado: {format_duration(seconds)}{suffix}"
+            (f"{len(configs)} config. × {len(slaves)} slaves — estimated max.: {format_duration(seconds)}{suffix}"
+             if self.current_language == "English" else
+             f"{len(configs)} config. × {len(slaves)} slaves — máx. estimado: {format_duration(seconds)}{suffix}")
         )
 
     def update_discovery_start_state(self):
@@ -979,9 +984,9 @@ class SlaveFinderMixin:
         for iid in self.discovery_tree.get_children():
             self.discovery_tree.delete(iid)
         self.discovery_found_count = 0
-        self.discovery_found_var.set("Encontrados: 0")
+        self.discovery_found_var.set("Found: 0" if self.current_language == "English" else "Encontrados: 0")
         self.discovery_progress_var.set(0.0)
-        self.discovery_status_var.set("Parado")
+        self.discovery_status_var.set(self.tr("Parado"))
         self.update_discovery_estimate()
 
     def open_discovery_serial_port(self, serial, port, baud, parity, stopbits):
@@ -1031,29 +1036,29 @@ class SlaveFinderMixin:
         serial, _ = self.get_serial_modules()
         if serial is None:
             messagebox.showerror(
-                "pyserial em falta",
-                "pyserial não está instalado. O build_exe.bat inclui-o automaticamente no EXE."
+                self.tr("pyserial em falta"),
+                ("pyserial is not installed. build_exe.bat includes it automatically in the EXE." if self.current_language == "English" else "pyserial não está instalado. O build_exe.bat inclui-o automaticamente no EXE.")
             )
             return
 
         if not self.discovery_safety_var.get():
             messagebox.showwarning(
-                "Pesquisa ativa",
-                "Confirma primeiro que não existe outro master ativo no barramento."
+                self.tr("Pesquisa ativa"),
+                ("First confirm that no other master is active on the bus." if self.current_language == "English" else "Confirma primeiro que não existe outro master ativo no barramento.")
             )
             return
 
         try:
             port = self.discovery_port_var.get().strip()
             if not port:
-                raise ValueError("Seleciona uma porta COM.")
+                raise ValueError("Select a COM port." if self.current_language == "English" else "Seleciona uma porta COM.")
             configs = self.selected_discovery_configs()
             if not configs:
-                raise ValueError("Seleciona pelo menos uma configuração série.")
+                raise ValueError("Select at least one serial configuration." if self.current_language == "English" else "Seleciona pelo menos uma configuração série.")
             slaves = self.selected_discovery_slaves()
             minimum_timeout_ms = self.selected_discovery_min_timeout_ms()
         except Exception as exc:
-            messagebox.showerror("Configuração inválida", str(exc))
+            messagebox.showerror(self.tr("Configuração inválida"), str(exc))
             return
 
         fallback_fc04 = bool(self.discovery_fc04_fallback_var.get())
@@ -1065,7 +1070,7 @@ class SlaveFinderMixin:
         self.discovery_stop_event.clear()
         self.discovery_found_count = 0
         self.discovery_progress_var.set(0.0)
-        self.discovery_status_var.set("A iniciar pesquisa…")
+        self.discovery_status_var.set(self.tr("A iniciar pesquisa…"))
 
         self.discovery_start_btn.configure(state="disabled")
         self.discovery_stop_btn.configure(state="normal")
@@ -1106,17 +1111,17 @@ class SlaveFinderMixin:
             self.restart_btn.configure(state="normal")
             self.set_sniffer_refresh_state("normal")
             self.set_simulation_button_state("normal")
-            self.discovery_status_var.set("Erro ao iniciar pesquisa")
+            self.discovery_status_var.set(self.tr("Erro ao iniciar pesquisa"))
             self.update_discovery_start_state()
             messagebox.showerror(
-                "Erro na Bus Slave Finder",
-                f"Não foi possível iniciar a thread de pesquisa:\n\n"
-                f"{type(exc).__name__}: {exc}"
+                self.tr("Erro na Bus Slave Finder"),
+                (("Could not start the scan thread:\n\n") if self.current_language == "English" else "Não foi possível iniciar a thread de pesquisa:\n\n")
+                + f"{type(exc).__name__}: {self.tr(str(exc))}"
             )
 
     def stop_discovery_scan(self):
         if self.discovery_active:
-            self.discovery_status_var.set("A parar…")
+            self.discovery_status_var.set(self.tr("A parar…"))
             self.discovery_stop_event.set()
             self.discovery_stop_btn.configure(state="disabled")
             # Wake/cancel pending driver I/O without closing the handle from
@@ -1143,7 +1148,7 @@ class SlaveFinderMixin:
                 context = f"{port} — {baud} / {config_label}"
                 self.event_queue.put((
                     "discovery_status",
-                    f"A configurar {baud} / {config_label}…"
+                    (f"Configuring {baud} / {config_label}…" if self.current_language == "English" else f"A configurar {baud} / {config_label}…")
                 ))
 
                 ser = None
@@ -1154,8 +1159,8 @@ class SlaveFinderMixin:
                         )
                     except Exception as exc:
                         raise RuntimeError(
-                            f"Não foi possível abrir {port} em {baud} / {config_label}: "
-                            f"{type(exc).__name__}: {exc}"
+                            ((f"Could not open {port} at {baud} / {config_label}: ") if self.current_language == "English" else f"Não foi possível abrir {port} em {baud} / {config_label}: ")
+                            + f"{type(exc).__name__}: {self.tr(str(exc))}"
                         ) from exc
 
                     self.discovery_serial = ser
@@ -1193,8 +1198,8 @@ class SlaveFinderMixin:
                                 ser.reset_input_buffer()
                             except Exception as exc:
                                 raise RuntimeError(
-                                    f"Falha ao preparar a receção em {context}: "
-                                    f"{type(exc).__name__}: {exc}"
+                                    ((f"Failed to prepare reception at {context}: ") if self.current_language == "English" else f"Falha ao preparar a receção em {context}: ")
+                                    + f"{type(exc).__name__}: {self.tr(str(exc))}"
                                 ) from exc
 
                             request = build_discovery_probe(slave, fc)
@@ -1206,8 +1211,8 @@ class SlaveFinderMixin:
                                 )
                             except Exception as exc:
                                 raise RuntimeError(
-                                    f"Falha ao transmitir em {context}: "
-                                    f"{type(exc).__name__}: {exc}"
+                                    ((f"Failed to transmit at {context}: ") if self.current_language == "English" else f"Falha ao transmitir em {context}: ")
+                                    + f"{type(exc).__name__}: {self.tr(str(exc))}"
                                 ) from exc
 
                             if not sent or self.discovery_stop_event.is_set():
@@ -1220,8 +1225,8 @@ class SlaveFinderMixin:
                                 )
                             except Exception as exc:
                                 raise RuntimeError(
-                                    f"Falha ao receber em {context}: "
-                                    f"{type(exc).__name__}: {exc}"
+                                    ((f"Failed to receive at {context}: ") if self.current_language == "English" else f"Falha ao receber em {context}: ")
+                                    + f"{type(exc).__name__}: {self.tr(str(exc))}"
                                 ) from exc
 
                             if result is not None:
@@ -1265,8 +1270,8 @@ class SlaveFinderMixin:
                                     )
                                 except Exception as exc:
                                     raise RuntimeError(
-                                        f"Falha em Device Identification em {context}: "
-                                        f"{type(exc).__name__}: {exc}"
+                                        ((f"Device Identification failed at {context}: ") if self.current_language == "English" else f"Falha em Device Identification em {context}: ")
+                                        + f"{type(exc).__name__}: {self.tr(str(exc))}"
                                     ) from exc
                                 device_id_text = format_device_identification(
                                     device_result
@@ -1348,15 +1353,16 @@ class SlaveFinderMixin:
             f"{completed} / {payload['total']} — "
             f"{payload['baud']} / {payload['config']} / Slave {payload['slave']}"
         )
-        self.discovery_found_var.set(f"Encontrados: {payload['found']}")
+        self.discovery_found_var.set((f"Found: {payload['found']}" if self.current_language == "English" else f"Encontrados: {payload['found']}"))
         self.discovery_status_var.set(
-            f"Decorrido {format_duration(payload['elapsed'])} — "
-            f"restante ~{format_duration(payload['eta'])}"
+            (f"Elapsed {format_duration(payload['elapsed'])} — remaining ~{format_duration(payload['eta'])}"
+             if self.current_language == "English" else
+             f"Decorrido {format_duration(payload['elapsed'])} — restante ~{format_duration(payload['eta'])}")
         )
 
     def add_discovery_result(self, payload):
         self.discovery_found_count += 1
-        self.discovery_found_var.set(f"Encontrados: {self.discovery_found_count}")
+        self.discovery_found_var.set((f"Found: {self.discovery_found_count}" if self.current_language == "English" else f"Encontrados: {self.discovery_found_count}"))
         self.discovery_tree.insert(
             "", "end",
             values=(
@@ -1390,18 +1396,18 @@ class SlaveFinderMixin:
         self.set_simulation_button_state("normal")
 
         if payload.get("error"):
-            self.discovery_status_var.set("Erro na pesquisa")
-            messagebox.showerror("Erro na Bus Slave Finder", payload["error"])
+            self.discovery_status_var.set(self.tr("Erro na pesquisa"))
+            messagebox.showerror(self.tr("Erro na Bus Slave Finder"), payload["error"])
         elif payload.get("stopped"):
             self.discovery_status_var.set(
-                f"Pesquisa parada — {payload['found']} encontrados — "
-                f"{format_duration(payload['elapsed'])}"
+                ((f"Scan stopped — {payload['found']} found — ") if self.current_language == "English" else f"Pesquisa parada — {payload['found']} encontrados — ")
+                + f"{format_duration(payload['elapsed'])}"
             )
         else:
             self.discovery_progress_var.set(100.0)
             self.discovery_status_var.set(
-                f"Pesquisa concluída — {payload['found']} encontrados — "
-                f"{format_duration(payload['elapsed'])}"
+                ((f"Scan complete — {payload['found']} found — ") if self.current_language == "English" else f"Pesquisa concluída — {payload['found']} encontrados — ")
+                + f"{format_duration(payload['elapsed'])}"
             )
 
         self.update_discovery_estimate()
