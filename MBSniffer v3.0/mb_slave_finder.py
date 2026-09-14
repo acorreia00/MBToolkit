@@ -610,6 +610,7 @@ class SlaveFinderMixin:
         # Baud-rate checkboxes. Defaults keep a normal industrial scan quick.
         baud_frame = ttk.LabelFrame(options, text="Baud rate")
         baud_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        baud_frame.rowconfigure(0, weight=1)
         self.discovery_baud_vars = {}
         for idx in range(len(DISCOVERY_BAUD_RATES)):
             baud_frame.columnconfigure(idx, weight=1, uniform="baud")
@@ -617,7 +618,7 @@ class SlaveFinderMixin:
             var = tk.BooleanVar(value=baud in saved_bauds)
             self.discovery_baud_vars[baud] = var
             cb = ttk.Checkbutton(baud_frame, text=str(baud), variable=var)
-            cb.grid(row=0, column=idx, sticky="w", padx=8, pady=5)
+            cb.grid(row=0, column=idx, sticky="", padx=4, pady=(8, 7))
             var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
 
         serial_frame = ttk.Frame(options)
@@ -630,6 +631,7 @@ class SlaveFinderMixin:
 
         parity_box = ttk.LabelFrame(serial_frame, text="Parity")
         parity_box.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        parity_box.rowconfigure(0, weight=1)
         for idx in range(len(DISCOVERY_PARITIES)):
             parity_box.columnconfigure(idx, weight=1, uniform="parity")
         self.discovery_parity_vars = {}
@@ -637,11 +639,12 @@ class SlaveFinderMixin:
             var = tk.BooleanVar(value=parity in saved_parities)
             self.discovery_parity_vars[parity] = var
             ttk.Checkbutton(parity_box, text=parity, variable=var).grid(
-                row=0, column=idx, sticky="w", padx=8, pady=5
+                row=0, column=idx, sticky="", padx=4, pady=(8, 7)
             )
             var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
         stop_box = ttk.LabelFrame(serial_frame, text="Stop bits")
         stop_box.grid(row=0, column=1, sticky="nsew", padx=5)
+        stop_box.rowconfigure(0, weight=1)
         for idx in range(len(DISCOVERY_STOP_BITS)):
             stop_box.columnconfigure(idx, weight=1, uniform="stop")
         self.discovery_stop_vars = {}
@@ -649,25 +652,44 @@ class SlaveFinderMixin:
             var = tk.BooleanVar(value=stopbits in saved_stops)
             self.discovery_stop_vars[stopbits] = var
             ttk.Checkbutton(stop_box, text=stopbits, variable=var).grid(
-                row=0, column=idx, sticky="w", padx=10, pady=5
+                row=0, column=idx, sticky="", padx=4, pady=(8, 7)
             )
             var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
         range_box = ttk.LabelFrame(serial_frame, text="Slave IDs / velocidade")
         range_box.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
-        ttk.Label(range_box, text="De").grid(row=0, column=0, padx=(8, 3), pady=5)
+        range_box.columnconfigure(0, weight=1)
+        range_box.rowconfigure(0, weight=1)
+
+        # Keep the range and timeout controls on one centred line so this
+        # LabelFrame stays as compact as the neighbouring Parity/Stop bits
+        # boxes.  The option checkboxes keep their own second line so the long
+        # Device Identification caption remains fully inside the rectangle.
+        range_content = ttk.Frame(range_box)
+        range_content.grid(
+            row=0, column=0, sticky="nsew", padx=8, pady=(8, 7)
+        )
+        range_content.columnconfigure(0, weight=1)
+        for row in range(2):
+            range_content.rowconfigure(row, weight=1, uniform="range_rows")
+
+        id_row = ttk.Frame(range_content)
+        id_row.grid(row=0, column=0, sticky="")
+        ttk.Label(id_row, text="De").grid(row=0, column=0, padx=(0, 3))
         self.discovery_slave_start_var = tk.StringVar(value=finder_saved.get("slave_start", "1"))
         self.discovery_slave_start_spin = ttk.Spinbox(
-            range_box, from_=1, to=247, width=5, textvariable=self.discovery_slave_start_var
+            id_row, from_=1, to=247, width=5, textvariable=self.discovery_slave_start_var
         )
-        self.discovery_slave_start_spin.grid(row=0, column=1, padx=3, pady=5)
-        ttk.Label(range_box, text="até").grid(row=0, column=2, padx=3, pady=5)
+        self.discovery_slave_start_spin.grid(row=0, column=1, padx=3)
+        ttk.Label(id_row, text="até").grid(row=0, column=2, padx=3)
         self.discovery_slave_end_var = tk.StringVar(value=finder_saved.get("slave_end", "247"))
         self.discovery_slave_end_spin = ttk.Spinbox(
-            range_box, from_=1, to=247, width=5, textvariable=self.discovery_slave_end_var
+            id_row, from_=1, to=247, width=5, textvariable=self.discovery_slave_end_var
         )
-        self.discovery_slave_end_spin.grid(row=0, column=3, padx=3, pady=5)
+        self.discovery_slave_end_spin.grid(row=0, column=3, padx=3)
 
-        ttk.Label(range_box, text="Timeout mín.").grid(row=1, column=0, padx=(8, 3), pady=5)
+        ttk.Label(id_row, text="Timeout mín.").grid(
+            row=0, column=4, padx=(14, 3)
+        )
         self.discovery_min_timeout_var = tk.StringVar(
             value=finder_saved.get(
                 "min_timeout_ms",
@@ -675,35 +697,38 @@ class SlaveFinderMixin:
             )
         )
         self.discovery_min_timeout_spin = ttk.Spinbox(
-            range_box,
+            id_row,
             from_=DISCOVERY_MIN_TIMEOUT_MS,
             to=DISCOVERY_MAX_TIMEOUT_MS,
             increment=5,
             width=6,
             textvariable=self.discovery_min_timeout_var,
         )
-        self.discovery_min_timeout_spin.grid(row=1, column=1, padx=3, pady=5)
-        ttk.Label(range_box, text="ms").grid(row=1, column=2, padx=3, pady=5)
+        self.discovery_min_timeout_spin.grid(row=0, column=5, padx=3)
+        ttk.Label(id_row, text="ms").grid(row=0, column=6, padx=3)
+
+        toggles = ttk.Frame(range_content)
+        # Small vertical separation from the Slave range/timeout row.
+        # Keep this deliberately modest so the panel remains compact.
+        toggles.grid(row=1, column=0, sticky="", pady=(3, 0))
 
         self.discovery_fc04_fallback_var = tk.BooleanVar(value=finder_saved.get("fc04_fallback", False))
         fallback_cb = ttk.Checkbutton(
-            range_box,
+            toggles,
             text="FC04 fallback",
             variable=self.discovery_fc04_fallback_var,
         )
-        fallback_cb.grid(row=1, column=3, sticky="w", padx=8, pady=5)
+        fallback_cb.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
         self.discovery_device_identification_var = tk.BooleanVar(
             value=finder_saved.get("device_identification", False)
         )
         device_id_cb = ttk.Checkbutton(
-            range_box,
+            toggles,
             text="Device Identification (FC43/14)",
             variable=self.discovery_device_identification_var,
         )
-        device_id_cb.grid(
-            row=1, column=4, sticky="w", padx=(4, 8), pady=5
-        )
+        device_id_cb.grid(row=0, column=1, sticky="w")
 
         for var in (
             self.discovery_slave_start_var,

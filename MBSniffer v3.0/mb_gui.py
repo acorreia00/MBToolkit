@@ -1376,6 +1376,10 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         stats.grid(row=1, column=0, sticky="nsew")
         for col in range(4):
             stats.columnconfigure(col, weight=1, uniform="stats")
+        # Keep the eight counters centred in a fixed 4 x 2 matrix.  The
+        # labels must not hug the LabelFrame border or shift with translation.
+        for row in range(2):
+            stats.rowconfigure(row, weight=1, uniform="stats_rows")
 
         self.stat_requests_var = tk.StringVar(value="Pedidos: 0")
         self.stat_responses_var = tk.StringVar(value="Respostas: 0")
@@ -1397,12 +1401,17 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             self.stat_slaves_var,
         ]
         for idx, var in enumerate(stat_vars):
-            ttk.Label(stats, textvariable=var, style="MBS.Stat.TLabel").grid(
+            ttk.Label(
+                stats,
+                textvariable=var,
+                style="MBS.Stat.TLabel",
+                anchor="center",
+            ).grid(
                 row=idx // 4,
                 column=idx % 4,
-                sticky="w",
-                padx=(8, 5),
-                pady=(6 if idx < 4 else 4, 6),
+                sticky="",
+                padx=6,
+                pady=3,
             )
 
         # Notebook
