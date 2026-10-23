@@ -533,6 +533,28 @@ def get_workspaces_folder() -> Path:
     return folder
 
 
+def get_master_workspaces_folder() -> Path:
+    """
+    Return/create the Master workspace folder inside the workspace folder:
+
+        %APPDATA%\\MBToolkit\\Workspaces\\Master
+
+    Up to v3.4 the Master workspaces were kept directly in Workspaces. The
+    first time this folder is created, those files are moved into it.
+    """
+    root = get_workspaces_folder()
+    folder = root / "Master"
+    if not folder.exists():
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in root.glob("*.mbsw"):
+            try:
+                if old.is_file() and not (folder / old.name).exists():
+                    shutil.move(str(old), str(folder / old.name))
+            except OSError:
+                pass
+    return folder
+
+
 def get_slave_workspaces_folder() -> Path:
     """
     Return/create the Slave workspace folder inside the workspace folder:

@@ -326,11 +326,27 @@ class MasterWorkspaceFolderTests(unittest.TestCase):
         self.assertEqual(folder.name, "Workspaces")
         self.assertEqual(folder.parent, mb_config.get_settings_file().parent)
         self.assertTrue(folder.is_dir())
+        master = mb_config.get_master_workspaces_folder()
+        self.assertEqual((master.name, master.parent), ("Master", folder))
+        self.assertEqual(mb_master_ui.workspace_path("Linha 1").parent, master)
+
+    def test_loose_master_workspaces_move_into_the_master_folder(self):
+        root = mb_config.get_workspaces_folder()
+        (root / "Linha 1.mbsw").write_text('{"windows": []}', encoding="utf-8")
+        (root / "notas.txt").write_text("x", encoding="utf-8")
+        self.assertEqual(mb_master_ui.list_workspaces(), ["Linha 1"])
+        master = mb_config.get_master_workspaces_folder()
+        self.assertTrue((master / "Linha 1.mbsw").is_file())
+        self.assertFalse((root / "Linha 1.mbsw").exists())
+        self.assertTrue((root / "notas.txt").exists())
+        # Only the first time: a file put in Workspaces later stays there.
+        (root / "Outro.mbsw").write_text("{}", encoding="utf-8")
+        self.assertEqual(mb_master_ui.list_workspaces(), ["Linha 1"])
 
     def test_saved_workspaces_are_listed_by_name(self):
         for name in ("Subestação B", "armazém", "Linha 1"):
             mb_master_ui.workspace_path(name).write_text("{}", encoding="utf-8")
-        (mb_config.get_workspaces_folder() / "notas.txt").write_text("x", encoding="utf-8")
+        (mb_config.get_master_workspaces_folder() / "notas.txt").write_text("x", encoding="utf-8")
         self.assertEqual(mb_master_ui.list_workspaces(),
                          ["armazém", "Linha 1", "Subestação B"])
 

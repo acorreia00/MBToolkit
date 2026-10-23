@@ -107,8 +107,11 @@ by Master and Slave, plus the workspace-file helpers).</li>
 <li><b>Master refactor:</b> <code>MasterMixin</code> now uses <code>TableUiMixin</code>;
 its behaviour is unchanged. <code>apply_format_to_rows()</code>,
 <code>validate_workspace_name()</code>, <code>workspace_path()</code> and
-<code>list_workspaces()</code> moved to <code>mb_table_ui.py</code> and are re-exported by
-<code>mb_master_ui.py</code>.</li>
+<code>list_workspaces()</code> moved to <code>mb_table_ui.py</code> (which takes the folder);
+<code>mb_master_ui.py</code> keeps Master versions bound to the Master folder.</li>
+<li><b>Workspace folders:</b> Master workspaces now live in
+<code>Workspaces\\Master</code> and Slave workspaces in <code>Workspaces\\Slave</code>;
+Master files left directly in <code>Workspaces</code> are moved once.</li>
 <li><b>Requests answered:</b> FC01&ndash;06, FC15 and FC16; Exception 01 (function), 02
 (address outside the windows) and 03 (quantity / value / byte count); broadcast writes
 executed on every covering Slave ID without a response; requests for other IDs
@@ -563,7 +566,9 @@ display scaling).</li>
 wheel scrolls the window grid and never changes combobox/spinbox values.</li>
 <li>The <b>Workspace</b> menu saves named <code>.mbsw</code> files (JSON) with the
 connection parameters, every window, its name and address names in
-<code>%APPDATA%\\MBToolkit\\Workspaces</code>, beside <code>settings.json</code>; it lists
+<code>%APPDATA%\\MBToolkit\\Workspaces\\Master</code> (<code>get_master_workspaces_folder()</code>,
+which moves workspaces left directly in <code>Workspaces</code> by earlier versions into it
+once), beside <code>settings.json</code>; it lists
 them to open or delete. Invalid entries are skipped with a warning.</li>
 <li>Changes to the open workspace mark it "(modified)". <code>settings.json</code> keeps
 <code>master.last_workspace</code>, reopened at start-up without connecting; on exit,

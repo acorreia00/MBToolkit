@@ -2948,4 +2948,8 @@ guarda só a configuração; a simulação de falhas entra já na Fase 1, por Sl
   tempo; mensagem do Master atualizada.
 - Ajuda PT/EN com a secção do Slave; README; PDF com capítulo "Slave
   (simulator) tab", diagrama do motor e captura.
-- Testes: 88 → 111 (`tests/test_slave.py`).
+- Workspaces do Master em `Workspaces\Master` (simétrico com o Slave);
+  `get_master_workspaces_folder()` move uma vez os `.mbsw` soltos em
+  `Workspaces`. `workspace_path()` / `list_workspaces()` de `mb_table_ui.py`
+  recebem sempre a pasta; `mb_master_ui.py` tem as versões do Master.
+- Testes: 88 → 112 (`tests/test_slave.py` e migração da pasta do Master).

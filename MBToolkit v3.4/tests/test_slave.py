@@ -428,7 +428,8 @@ class SlaveSettingsTests(unittest.TestCase):
         self.assertEqual(folder.parent, mb_config.get_workspaces_folder())
         workspace_path("Banco", folder).write_text("{}", encoding="utf-8")
         self.assertEqual(list_workspaces(folder), ["Banco"])
-        self.assertEqual(list_workspaces(), [])  # not listed with the Master ones
+        # Not listed with the Master ones.
+        self.assertEqual(list_workspaces(mb_config.get_master_workspaces_folder()), [])
 
     def test_slave_settings_are_validated(self):
         mb_config.save_ui_settings(settings={

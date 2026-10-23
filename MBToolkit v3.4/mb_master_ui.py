@@ -28,7 +28,7 @@ from mb_config import (
     MASTER_WORKSPACE_FORMATS,
     MASTER_WORKSPACE_VERSION,
     MODBUS_EXCEPTION_CODES,
-    get_workspaces_folder,
+    get_master_workspaces_folder,
 )
 from mb_diagnostics import FUNCTION_NAMES
 from mb_master import (
@@ -58,14 +58,14 @@ from mb_table_ui import (
     TABLE_PANE_MIN_WIDTH,
     TableUiMixin,
     apply_format_to_rows,
-    list_workspaces,
     parse_int_field,
     validate_workspace_name,
     validated_formats,
     validated_names,
     validated_scales,
-    workspace_path,
 )
+from mb_table_ui import list_workspaces as _list_workspaces
+from mb_table_ui import workspace_path as _workspace_path
 from mb_theme import theme_colors
 from mb_widgets import RefreshButton
 
@@ -77,6 +77,16 @@ MASTER_PANE_MAX_ROWS = TABLE_PANE_MAX_ROWS
 MASTER_OK_MESSAGE_SECONDS = 3.0
 MASTER_MAX_TITLE_LENGTH = TABLE_MAX_TITLE_LENGTH
 MASTER_WHEEL_TAG = "MBToolkit.MasterWheel"
+
+
+def workspace_path(name):
+    """File of a Master workspace (in Workspaces\\Master)."""
+    return _workspace_path(name, get_master_workspaces_folder())
+
+
+def list_workspaces():
+    """Names of the saved Master workspaces, sorted alphabetically."""
+    return _list_workspaces(get_master_workspaces_folder())
 
 
 def fc_choice_label(fc):
@@ -1175,7 +1185,7 @@ class MasterMixin(TableUiMixin):
         return True
 
     def master_open_workspace_folder(self):
-        self._table_open_folder(get_workspaces_folder())
+        self._table_open_folder(get_master_workspaces_folder())
 
     def master_open_workspace(self, name, quiet=False):
         """Replace the current windows with a saved workspace (by name).

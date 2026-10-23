@@ -367,7 +367,9 @@ Regras:
   nunca altera Comboboxes/Spinboxes.
 - Workspaces: menu "Workspace" (Guardar workspace…, Abrir workspace ▸, Apagar
   workspace ▸, Abrir pasta dos workspaces). Cada workspace é um ficheiro
-  `<nome>.mbsw` em `%APPDATA%\MBToolkit\Workspaces` (`get_workspaces_folder()`,
+  `<nome>.mbsw` em `%APPDATA%\MBToolkit\Workspaces\Master`
+  (`get_master_workspaces_folder()`; até à v3.4 ficavam soltos em `Workspaces`
+  e são movidos para `Master` na primeira vez que a pasta é criada;
   ao lado do `settings.json`). Os nomes são validados como nomes de ficheiro do
   Windows. O menu é reconstruído sempre que se abre.
 - Formato `.mbsw` (JSON, `format = "MBToolkit Master workspace"`, versão 1):

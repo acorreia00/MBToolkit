@@ -2399,7 +2399,7 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
         h(
             "O menu “Workspace” guarda a ligação, todas as janelas, os nomes e os formatos "
             "com um nome à escolha, e lista os workspaces guardados para os abrir ou apagar "
-            "diretamente. Os ficheiros ficam em %APPDATA%\\MBToolkit\\Workspaces, junto das "
+            "diretamente. Os ficheiros ficam em %APPDATA%\\MBToolkit\\Workspaces\\Master, junto das "
             "preferências.\n"
         )
         h(

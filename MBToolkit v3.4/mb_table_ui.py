@@ -17,7 +17,6 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from mb_config import get_workspaces_folder
 from mb_master import FORMAT_SIZES, REGISTER_FORMATS, validate_scale
 from mb_theme import theme_colors
 
@@ -64,15 +63,13 @@ def validate_workspace_name(name):
     return name
 
 
-def workspace_path(name, folder=None):
-    folder = folder if folder is not None else get_workspaces_folder()
+def workspace_path(name, folder):
     return folder / f"{validate_workspace_name(name)}{WORKSPACE_SUFFIX}"
 
 
-def list_workspaces(folder=None):
+def list_workspaces(folder):
     """Names of the saved workspaces in *folder*, sorted alphabetically."""
     try:
-        folder = folder if folder is not None else get_workspaces_folder()
         files = folder.glob(f"*{WORKSPACE_SUFFIX}")
         return sorted((f.stem for f in files if f.is_file()), key=str.casefold)
     except OSError:

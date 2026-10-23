@@ -27,6 +27,8 @@ NOVIDADES v3.4
   como no Master. Menu Workspace próprio (só configuração; os valores começam
   a 0), guardado em %APPDATA%\MBToolkit\Workspaces\Slave.
 - Sniffer, Finder, Master e Slave nunca funcionam ao mesmo tempo.
+- Os workspaces do Master passam para %APPDATA%\MBToolkit\Workspaces\Master
+  (movidos automaticamente no primeiro arranque).
 
 BASE FUNCIONAL DA v3.3
 - O programa passa a chamar-se MBToolkit (antes MBSniffer), com ícone novo,
@@ -286,7 +288,7 @@ e "✕" fecha-a.
 
 Menu "Workspace": "Guardar workspace…" grava tudo com um nome; "Abrir
 workspace" e "Apagar workspace" mostram a lista dos workspaces guardados.
-Ficam em %APPDATA%\MBToolkit\Workspaces, junto das preferências.
+Ficam em %APPDATA%\MBToolkit\Workspaces\Master, junto das preferências.
 O último workspace reabre ao arrancar (sem ligar). Com alterações por guardar
 aparece "(alterado)" e, ao fechar o programa, a pergunta "Guardar alterações?".
 Janelas sem workspace fecham sem perguntar.
