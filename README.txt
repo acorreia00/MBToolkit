@@ -1,14 +1,43 @@
-MBSNIFFER v3.2
+MBTOOLKIT v3.4
 ================
 
-MBSniffer é uma ferramenta Windows para diagnóstico de Modbus RTU.
+MBToolkit é uma ferramenta Windows para diagnóstico de Modbus RTU.
 
 - Sniffer: passivo; não transmite dados.
 - Bus Slave Finder: ativo; transmite pedidos Modbus RTU de leitura.
 - Master: ativo; lê e escreve valores como master Modbus RTU.
+- Slave: ativo; simula equipamentos Modbus RTU e responde a um master real.
 
-NOVIDADES v3.2
+NOVIDADES v3.4
 --------------
+- Novo separador Slave: o MBToolkit faz de um ou mais equipamentos Modbus RTU
+  e responde aos pedidos de um master real (PLC, SCADA, Modbus Poll).
+- Cada janela é uma tabela de um Slave simulado: Slave ID, Coils, Discrete
+  Inputs, Holding ou Input Registers, endereço e quantidade (até 2000).
+  Vários Slave IDs, cada um com várias janelas.
+- Responde a FC01–FC06, FC15 e FC16, com Exception 01/02/03 como um
+  equipamento real; broadcast executado sem resposta; ignora o eco do
+  adaptador RS485.
+- Duplo clique num valor altera-o; as escritas do master ficam destacadas a
+  amarelo por instantes.
+- Simulação de falhas por Slave ID ("Falhas…"): atraso, não responder,
+  Exception à escolha, CRC errado e probabilidade (%). A falha ativa aparece a
+  vermelho no cabeçalho das janelas.
+- Formatos, escala, nomes, Copiar, Base, renomear, destacar e fechar janelas
+  como no Master. Menu Workspace próprio (só configuração; os valores começam
+  a 0), guardado em %APPDATA%\MBToolkit\Workspaces\Slave.
+- Sniffer, Finder, Master e Slave nunca funcionam ao mesmo tempo.
+
+BASE FUNCIONAL DA v3.3
+- O programa passa a chamar-se MBToolkit (antes MBSniffer), com ícone novo,
+  mais nítido em todos os tamanhos.
+- Na primeira vez que arranca, copia as preferências e os workspaces de
+  %APPDATA%\MBSniffer para %APPDATA%\MBToolkit. A pasta antiga fica intacta.
+- Os logs novos ficam em "MBToolkit Logs"; os antigos continuam em
+  "MBSniffer Logs".
+- Workspaces guardados com o MBSniffer continuam a abrir.
+
+BASE FUNCIONAL DA v3.2
 - Novo separador Master: várias janelas, uma por Slave ou zona de memória.
 - Cada janela: Slave ID, função FC01–FC04, endereço, quantidade, scan rate,
   base 0/1 e formato; botões Aplicar, Pausar, Ler 1x e Duplicar; no cabeçalho,
@@ -257,7 +286,7 @@ e "✕" fecha-a.
 
 Menu "Workspace": "Guardar workspace…" grava tudo com um nome; "Abrir
 workspace" e "Apagar workspace" mostram a lista dos workspaces guardados.
-Ficam em %APPDATA%\MBSniffer\Workspaces, junto das preferências.
+Ficam em %APPDATA%\MBToolkit\Workspaces, junto das preferências.
 O último workspace reabre ao arrancar (sem ligar). Com alterações por guardar
 aparece "(alterado)" e, ao fechar o programa, a pergunta "Guardar alterações?".
 Janelas sem workspace fecham sem perguntar.
@@ -301,7 +330,7 @@ PREFERÊNCIAS GUARDADAS
 ----------------------
 Ficheiro único:
 
-    %APPDATA%\MBSniffer\settings.json
+    %APPDATA%\MBToolkit\settings.json
 
 São guardados:
 
@@ -327,7 +356,7 @@ EXECUTAR
 --------
 Depois de extrair o ZIP:
 
-    MBSniffer.bat
+    MBToolkit.bat
 
 O BAT verifica/instala automaticamente o pyserial.
 
@@ -335,19 +364,19 @@ BUILD DO EXE
 ------------
 Executar:
 
-    MBSniffer v3.2\build_exe.bat
+    MBToolkit v3.4\build_exe.bat
 
 Antes do build, os testes de regressão são executados automaticamente. Se algum teste falhar, o build é cancelado.
 
 O resultado é criado diretamente na raiz:
 
-    MBSniffer.exe
+    MBToolkit.exe
 
 TESTES DE REGRESSÃO
 -------------------
 Podem ser executados manualmente através de:
 
-    MBSniffer v3.2\run_tests.bat
+    MBToolkit v3.4\run_tests.bat
 
 A suite verifica CRC, parser/ressincronização, Function Codes suportados, pairing, broadcast, escritas FC05/FC06, frames partidos, timeouts, frame gap Auto, Bus Slave Finder (tentativas e barramento livre), Device Identification FC43/14 e traduções.
 
@@ -357,9 +386,9 @@ Capturas reais só criam um ficheiro quando existe tráfego.
 
 Pasta:
 
-    MBSniffer Logs\
+    MBToolkit Logs\
 
-fica ao lado de MBSniffer.bat / MBSniffer.exe.
+fica ao lado de MBToolkit.bat / MBToolkit.exe.
 
 REQUISITOS
 ----------
