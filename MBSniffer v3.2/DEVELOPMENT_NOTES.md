@@ -12,8 +12,8 @@ de cada decisão versão a versão, está em `CHANGELOG.md` (na mesma pasta).
 - `README.md` / `README.en.md` são a página do repositório.
 - `MBSniffer_vX.Y_Technical_Code_Documentation.pdf` (raiz do repositório) explica
   o código todo da versão mais recente.
-- O ZIP de entrega leva o projeto inteiro (código, `.git`, `tools/` e PDF), para
-  que o utilizador ande sempre com tudo num só ficheiro.
+- O ZIP de entrega leva só os ficheiros da aplicação, a documentação e
+  `tools/`; nada de git/GitHub (secção 2).
 
 ---
 
@@ -38,22 +38,20 @@ de cada decisão versão a versão, está em `CHANGELOG.md` (na mesma pasta).
   utilizador. A entrega termina no ZIP, criado a partir da pasta de trabalho
   como está (`git mv`/`git rm` para manter o repositório coerente são
   aceitáveis).
-- Fluxo do utilizador: apaga o conteúdo da pasta do git no PC, extrai lá o ZIP,
-  faz commit e faz push com `git push --force origin main` (o histórico dentro
-  do ZIP foi reescrito, ver secção 2a).
+- O repositório git e o GitHub são geridos só pelo utilizador; a release não
+  trata de nada relacionado com git além de manter a pasta coerente.
 - Cada alteração acrescenta uma secção no fim de `CHANGELOG.md`. Se a alteração
   muda uma regra em vigor, atualizar também este ficheiro.
 - **Em cada release, gerar de novo o PDF técnico** (secção 3).
 
 ## 2. Pacote de entrega
 
-Nome: `MBSniffer_vX.Y_Package.zip`, guardado ao lado do repositório (pasta
-`Modbus Sniffer`). Leva o repositório inteiro, a pedido do utilizador (v3.2),
-para que o histórico git, as ferramentas e o PDF nunca se percam:
+Nome: `MBSniffer_vX.Y_Package.zip`, guardado ao lado da pasta do projeto (pasta
+`Modbus Sniffer`). Leva os ficheiros da aplicação, a documentação e as
+ferramentas; **nada relacionado com git ou GitHub** (pedido do utilizador, v3.2):
 
 ```
 MBSniffer_vX.Y_Package.zip
-├── .git/                 (histórico do código; regras locais em .git/info/exclude)
 ├── tools/                (gerador do PDF, construtor do pacote, fontes, capturas)
 ├── MBSniffer_vX.Y_Technical_Code_Documentation.pdf
 ├── README.txt            (utilizador final, curto, regenerado em cada release)
@@ -83,43 +81,10 @@ MBSniffer_vX.Y_Package.zip
     └── CHANGELOG.md
 ```
 
-- Criado com `python -B tools/build_package.py --version X.Y`. Empacota a pasta
-  de trabalho tal como está, com uma cópia limpa do `.git` (secção 2a); o
-  repositório no disco nunca é alterado.
-- Nunca entram: `__pycache__`, `*.pyc`, `build/`, `*.spec`, `MBSniffer.exe`,
-  `MBSniffer Logs/`.
-- Com o `.git` e o PDF, o ZIP tem dezenas de MB; é o preço de levar tudo junto.
-
-## 2a. O que vai para o GitHub e o que fica no histórico
-
-Regras do utilizador (v3.2):
-
-- **Versionado (vai para o GitHub):** o código necessário para pôr a aplicação
-  a funcionar (`MBSniffer.bat`, `MBSniffer vX.Y/*.py`, `MBSniffer vX.Y/MBSniffer.ico`),
-  `README.md`, `README.en.md`, `README.txt`, o PDF técnico,
-  `MBSniffer vX.Y/DEVELOPMENT_NOTES.md` e `MBSniffer vX.Y/CHANGELOG.md`.
-- **Nunca versionado (só no disco e no ZIP):** `tests/`, `build_exe.bat`,
-  `run_tests.bat`, `tools/`, `__pycache__`.
-- **Só a versão atual dos documentos:** o histórico não guarda versões antigas
-  de `README.txt`, notas, CHANGELOG e PDF. Os commits antigos só têm o código e
-  os `README.md` / `README.en.md`.
-
-Como está implementado:
-
-- A lista branca está em `.git/info/exclude` (não há `.gitignore`). Esse
-  ficheiro fica dentro do `.git`, por isso nunca é enviado para o GitHub, mas
-  viaja no ZIP. Um `.py` novo entra sozinho; qualquer outro ficheiro novo fica
-  de fora até ser acrescentado à lista.
-- `tools/build_package.py` copia o `.git` para uma pasta temporária e reescreve
-  a cópia (`git filter-branch --index-filter`, `HISTORY_KEEP`): cada commit
-  existente fica só com código e `README.md` / `README.en.md`, commits vazios
-  desaparecem, as refs `origin/*` são retiradas e o `gc` apaga os objetos
-  antigos. É essa cópia que vai no ZIP; o repositório no disco não é tocado.
-- Como cada release reescreve o histórico, os identificadores dos commits
-  mudam e o push tem de ser forçado (`git push --force origin main`). Antes
-  desse push, o GitHub ainda tem o histórico antigo; um `git fetch` nessa altura
-  volta a trazê-lo para o PC, mas a release seguinte limpa-o outra vez.
-- Commits e push são sempre feitos pelo utilizador.
+- Criado com `python -B tools/build_package.py --version X.Y`, a partir da
+  pasta de trabalho tal como está.
+- Nunca entram: `.git`, `__pycache__`, `*.pyc`, `build/`, `*.spec`,
+  `MBSniffer.exe`, `MBSniffer Logs/`.
 
 ## 3. PDF técnico
 

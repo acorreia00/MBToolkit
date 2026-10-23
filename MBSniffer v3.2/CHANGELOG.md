@@ -2821,3 +2821,12 @@ Modbus Slave fica para mais tarde.
   ~0,3 MB e o ZIP de 77,6 MB para ~24 MB. O repositório no disco não é alterado.
 - Fluxo do utilizador: apagar a pasta do git, extrair o ZIP, commit e
   `git push --force origin main`.
+
+## Pacote só com os ficheiros da aplicação (pedido do utilizador)
+
+- O utilizador gere o git e o GitHub sozinho. O ZIP deixa de levar o `.git` e
+  deixa de haver limpeza/reescrita de histórico ou regras de GitHub no processo
+  de release (substitui as duas entradas anteriores sobre GitHub e histórico).
+- O ZIP leva: `MBSniffer.bat`, `README.txt`, `README.md`, `README.en.md`, o PDF,
+  a pasta `MBSniffer vX.Y` (código, ícone, testes, `.bat`, notas, CHANGELOG) e
+  `tools/`.
