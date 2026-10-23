@@ -16,6 +16,7 @@ from mb_config import (
     APP_VERSION,
     MIN_PENDING_REQUEST_TIMEOUT_SECONDS,
     MAX_PENDING_REQUEST_TIMEOUT_SECONDS,
+    SNIFFER_SPLIT_FRAME_HOLD_MS,
     UI_QUEUE_BATCH_SIZE,
     UI_QUEUE_IDLE_INTERVAL_MS,
     UI_QUEUE_BUSY_INTERVAL_MS,
@@ -23,6 +24,7 @@ from mb_config import (
 )
 from mb_protocol import (
     parse_burst,
+    burst_may_continue,
     build_anomaly_simulation_plan,
     modbus_rtu_interframe_gap_seconds,
 )
@@ -174,15 +176,15 @@ class CaptureMixin:
         port_b = self.port_b_var.get().strip()
 
         if not port_a:
-            raise ValueError("Select COM A." if self.current_language == "English" else "Seleciona a COM A.")
+            raise ValueError(self.tr("Seleciona a COM A."))
 
         plan = [("BUS" if mode == "RS485 2-wire" else "A→B", port_a)]
 
         if mode == "RS232 dual RX":
             if not port_b:
-                raise ValueError("Select COM B as well." if self.current_language == "English" else "Seleciona também a COM B.")
+                raise ValueError(self.tr("Seleciona também a COM B."))
             if port_a == port_b:
-                raise ValueError("COM A and COM B must be different." if self.current_language == "English" else "COM A e COM B têm de ser diferentes.")
+                raise ValueError(self.tr("COM A e COM B têm de ser diferentes."))
             plan.append(("B→A", port_b))
 
         return plan
@@ -236,7 +238,7 @@ class CaptureMixin:
 
         serial, _ = self.get_serial_modules()
         if serial is None:
-            messagebox.showerror(self.tr("pyserial em falta"), "pyserial is not installed." if self.current_language == "English" else "pyserial não está instalado.")
+            messagebox.showerror(self.tr("pyserial em falta"), self.tr("pyserial não está instalado."))
             return
 
         try:
@@ -257,7 +259,7 @@ class CaptureMixin:
                 self.install_opened_ports(opened)
                 self.update_idletasks()
             except Exception as exc:
-                messagebox.showerror(self.tr("Reiniciar COM"), (f"Could not restart the COM port:\n\n{exc}" if self.current_language == "English" else f"Não foi possível reiniciar a porta COM:\n\n{exc}"))
+                messagebox.showerror(self.tr("Reiniciar COM"), self.trf("Não foi possível reiniciar a porta COM:\n\n{error}", error=exc))
             finally:
                 for _, ser_obj in opened:
                     try:
@@ -304,7 +306,7 @@ class CaptureMixin:
             self.update_com_status()
             messagebox.showerror(
                 self.tr("Reiniciar COM"),
-                (f"Could not reopen the COM port. Capture was stopped.\n\n{exc}" if self.current_language == "English" else f"Não foi possível reabrir a porta COM. A captura foi parada.\n\n{exc}")
+                self.trf("Não foi possível reabrir a porta COM. A captura foi parada.\n\n{error}", error=exc)
             )
             return
 
@@ -328,7 +330,7 @@ class CaptureMixin:
         try:
             value = float(self.pending_timeout_var.get().strip().replace(",", "."))
         except ValueError:
-            raise ValueError("Invalid Pending timeout." if self.current_language == "English" else "Pending timeout inválido.")
+            raise ValueError(self.tr("Pending timeout inválido."))
 
         if not (
             MIN_PENDING_REQUEST_TIMEOUT_SECONDS
@@ -336,12 +338,10 @@ class CaptureMixin:
             <= MAX_PENDING_REQUEST_TIMEOUT_SECONDS
         ):
             raise ValueError(
-                (
-                    f"Pending timeout must be between {MIN_PENDING_REQUEST_TIMEOUT_SECONDS:g} and {MAX_PENDING_REQUEST_TIMEOUT_SECONDS:g} seconds."
-                    if self.current_language == "English"
-                    else "Pending timeout deve estar entre "
-                    f"{MIN_PENDING_REQUEST_TIMEOUT_SECONDS:g} e "
-                    f"{MAX_PENDING_REQUEST_TIMEOUT_SECONDS:g} segundos."
+                self.trf(
+                    "Pending timeout deve estar entre {minimum:g} e {maximum:g} segundos.",
+                    minimum=MIN_PENDING_REQUEST_TIMEOUT_SECONDS,
+                    maximum=MAX_PENDING_REQUEST_TIMEOUT_SECONDS,
                 )
             )
 
@@ -351,7 +351,7 @@ class CaptureMixin:
         if self.gap_mode_var.get() == "Manual":
             value = float(self.gap_ms_var.get().replace(",", "."))
             if value <= 0:
-                raise ValueError("Invalid manual Frame gap." if self.current_language == "English" else "Frame gap manual inválido.")
+                raise ValueError(self.tr("Frame gap manual inválido."))
             return value
 
         baud = int(self.baud_var.get())
@@ -427,7 +427,7 @@ class CaptureMixin:
         if serial is None:
             messagebox.showerror(
                 self.tr("pyserial em falta"),
-                ("pyserial is not installed.\n\nbuild_exe.bat includes it automatically in the EXE." if self.current_language == "English" else "pyserial não está instalado.\n\nO build_exe.bat inclui-o automaticamente no EXE.")
+                self.tr("pyserial não está instalado.\n\nO build_exe.bat inclui-o automaticamente no EXE.")
             )
             return
 
@@ -481,11 +481,32 @@ class CaptureMixin:
 
     def reader_loop(self, ser, gap_ms, channel, generation):
         gap_s = gap_ms / 1000.0
+        hold_s = max(gap_s, SNIFFER_SPLIT_FRAME_HOLD_MS / 1000.0)
         poll_sleep = min(max(gap_s / 8.0, 0.0002), 0.001)
 
         buffer = bytearray()
         buffer_wall = None
+        # (byte offset, epoch) of every read, so frames merged into one burst
+        # by USB latency keep their own arrival times.
+        chunk_times = []
         last_rx = None
+        # Burst length already checked by burst_may_continue(); avoids
+        # re-parsing an unchanged buffer on every poll of the hold window.
+        hold_checked_len = None
+        hold_active = False
+
+        def flush_buffer():
+            ts = (
+                buffer_wall.strftime("%H:%M:%S.%f")[:-3]
+                if buffer_wall else datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            )
+            event_epoch = (
+                buffer_wall.timestamp() if buffer_wall else time.time()
+            )
+            for row in parse_burst(
+                bytes(buffer), ts, channel, event_epoch, chunk_times
+            ):
+                self.event_queue.put(("frame", row))
 
         try:
             while not self.stop_event.is_set():
@@ -496,23 +517,30 @@ class CaptureMixin:
                     if chunk:
                         if not buffer:
                             buffer_wall = datetime.now()
+                            chunk_times.append((0, buffer_wall.timestamp()))
+                        else:
+                            chunk_times.append((len(buffer), time.time()))
                         buffer.extend(chunk)
                         last_rx = time.perf_counter()
 
                 elif buffer and last_rx is not None:
-                    if (time.perf_counter() - last_rx) >= gap_s:
-                        ts = (
-                            buffer_wall.strftime("%H:%M:%S.%f")[:-3]
-                            if buffer_wall else datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                        )
-                        event_epoch = (
-                            buffer_wall.timestamp() if buffer_wall else time.time()
-                        )
-                        for row in parse_burst(bytes(buffer), ts, channel, event_epoch):
-                            self.event_queue.put(("frame", row))
+                    idle_s = time.perf_counter() - last_rx
+                    if idle_s >= gap_s:
+                        if idle_s < hold_s:
+                            if hold_checked_len != len(buffer):
+                                hold_checked_len = len(buffer)
+                                hold_active = burst_may_continue(bytes(buffer))
+                            if hold_active:
+                                time.sleep(poll_sleep)
+                                continue
+
+                        flush_buffer()
                         buffer.clear()
+                        chunk_times.clear()
                         buffer_wall = None
                         last_rx = None
+                        hold_checked_len = None
+                        hold_active = False
 
                 time.sleep(poll_sleep)
 
@@ -522,15 +550,7 @@ class CaptureMixin:
 
         finally:
             if buffer:
-                ts = (
-                    buffer_wall.strftime("%H:%M:%S.%f")[:-3]
-                    if buffer_wall else datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                )
-                event_epoch = (
-                    buffer_wall.timestamp() if buffer_wall else time.time()
-                )
-                for row in parse_burst(bytes(buffer), ts, channel, event_epoch):
-                    self.event_queue.put(("frame", row))
+                flush_buffer()
 
             try:
                 ser.close()
@@ -774,8 +794,10 @@ class CaptureMixin:
                 try:
                     messagebox.showerror(
                         self.tr("Erro interno"),
-                        (("An error occurred while processing interface events. Processing will continue.\n\n") if self.current_language == "English" else "Ocorreu um erro ao processar eventos da interface. O processamento continuará.\n\n")
-                        + f"{type(exc).__name__}: {exc}"
+                        self.trf(
+                            "Ocorreu um erro ao processar eventos da interface. O processamento continuará.\n\n{error}",
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
                     )
                 except Exception:
                     pass

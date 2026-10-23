@@ -4,7 +4,9 @@
 import math
 import random
 import time
+from bisect import bisect_right
 from collections import defaultdict, deque
+from datetime import datetime
 
 from mb_config import (
     MODBUS_EXCEPTION_CODES,
@@ -14,16 +16,29 @@ from mb_config import (
     SLOW_RESPONSE_THRESHOLD_MS,
 )
 
-def crc16_modbus(data: bytes) -> int:
-    crc = 0xFFFF
-    for b in data:
-        crc ^= b
+def _build_crc16_table():
+    table = []
+    for value in range(256):
+        crc = value
         for _ in range(8):
             if crc & 1:
                 crc = (crc >> 1) ^ 0xA001
             else:
                 crc >>= 1
-    return crc & 0xFFFF
+        table.append(crc)
+    return tuple(table)
+
+# Table-driven CRC: one lookup per byte instead of eight shift/XOR steps. The
+# resynchronisation scan computes CRCs at many offsets, so this matters on
+# noisy buses.
+_CRC16_TABLE = _build_crc16_table()
+
+def crc16_modbus(data: bytes) -> int:
+    crc = 0xFFFF
+    table = _CRC16_TABLE
+    for b in data:
+        crc = (crc >> 8) ^ table[(crc ^ b) & 0xFF]
+    return crc
 
 def crc_ok(frame: bytes) -> bool:
     if len(frame) < 4:
@@ -63,6 +78,14 @@ def plausible_request_qty(fc: int, qty: int) -> bool:
         return 1 <= qty <= 125
     return True
 
+# Function Codes whose RTU frame length the parser can derive.
+KNOWN_FRAME_FUNCTION_CODES = (1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 22, 23)
+
+# Function Codes whose normal response is an exact copy of the request.
+EXACT_ECHO_FUNCTION_CODES = (5, 6, 22)
+
+BROADCAST_UNIT_ID = 0
+
 def _plausible_unit_id(value: int) -> bool:
     """Return True for Modbus RTU unit addresses that can appear on the wire."""
     try:
@@ -87,7 +110,7 @@ def _candidate_prefixes_at(buf, start=0):
     if fc & 0x80:
         # Exception responses use FC | 0x80 and have a fixed five-byte length.
         base_fc = fc & 0x7F
-        if base_fc in (1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 22, 23):
+        if base_fc in KNOWN_FRAME_FUNCTION_CODES:
             out.append((5, "EXCEPTION"))
         return out
 
@@ -245,6 +268,76 @@ def split_capture_buffer(data: bytes):
 
     return results
 
+def burst_may_continue(data: bytes) -> bool:
+    """Return True when *data* ends with the start of an unfinished frame.
+
+    USB-serial adapters deliver received bytes in chunks, so a silence longer
+    than t3.5 can occur in the middle of one RTU frame. The reader uses this
+    to wait a little longer before closing such a burst. Only the final
+    unvalidated segment is inspected, and only at its first byte.
+    """
+    segments = split_capture_buffer(data)
+    if not segments:
+        return False
+
+    tail, _kind, state = segments[-1]
+    if state == "OK":
+        return False
+
+    if not _plausible_unit_id(tail[0]):
+        return False
+    if len(tail) == 1:
+        return True
+
+    fc = tail[1]
+    if (fc & 0x7F) not in KNOWN_FRAME_FUNCTION_CODES:
+        return False
+    if len(tail) < 8 and not fc & 0x80:
+        # Too short for the request/response length fields to be known.
+        return True
+
+    return any(
+        length > len(tail)
+        for length, _kind in _candidate_prefixes_at(tail, 0)
+    )
+
+
+def read_bits_from_response(frame: bytes, qty=None):
+    """Return FC01/FC02 coil/input states, least-significant bit first.
+
+    Without the matching request quantity the padding bits of the last data
+    byte cannot be distinguished, so every transmitted bit is returned.
+    """
+    if len(frame) < 5:
+        return []
+    byte_count = frame[2]
+    data = frame[3:3 + byte_count]
+    bits = [(byte >> bit) & 1 for byte in data for bit in range(8)]
+    try:
+        qty = int(qty) if qty is not None else None
+    except (TypeError, ValueError):
+        qty = None
+    if qty is not None and 0 < qty <= len(bits):
+        bits = bits[:qty]
+    return bits
+
+
+# FC01/FC02 can return up to 2000 bits; the Traffic row shows only the first
+# ones (the Frame Inspector lists them all with their addresses).
+READ_BITS_DETAILS_LIMIT = 32
+
+
+def read_bits_details(frame: bytes, qty=None) -> str:
+    """Compact Details text: bits in address order, grouped per data byte."""
+    byte_count = frame[2] if len(frame) >= 3 else 0
+    bits = read_bits_from_response(frame, qty)
+    shown = "".join(str(bit) for bit in bits[:READ_BITS_DETAILS_LIMIT])
+    grouped = " ".join(shown[i:i + 8] for i in range(0, len(shown), 8))
+    if len(bits) > READ_BITS_DETAILS_LIMIT:
+        grouped += f" …(+{len(bits) - READ_BITS_DETAILS_LIMIT})"
+    return f"ByteCount={byte_count}  Bits={grouped}"
+
+
 def decode_frame(frame: bytes, kind_hint: str):
     info = {
         "kind": kind_hint,
@@ -304,6 +397,8 @@ def decode_frame(frame: bytes, kind_hint: str):
                 data = frame[3:3+bc]
                 regs = [(data[i] << 8) | data[i+1] for i in range(0, len(data), 2)]
                 details += f"  Registos={regs}"
+            elif fc in (1, 2) and len(frame) >= 5 + bc:
+                details = read_bits_details(frame)
             info["details"] = details
             return info
 
@@ -353,16 +448,40 @@ def decode_frame(frame: bytes, kind_hint: str):
     info["details"] = f"{len(frame)} bytes"
     return info
 
-def parse_burst(data: bytes, timestamp: str, channel: str = "", event_time=None):
+def format_clock_time(epoch: float) -> str:
+    return datetime.fromtimestamp(float(epoch)).strftime("%H:%M:%S.%f")[:-3]
+
+
+def parse_burst(data: bytes, timestamp: str, channel: str = "", event_time=None,
+                chunk_times=None):
+    """Split one received burst into decoded rows.
+
+    *chunk_times* is an optional ascending list of ``(byte_offset, epoch)``
+    pairs recording when each serial read arrived. When given, every frame
+    gets the arrival time of the chunk holding its first byte instead of the
+    burst start time, so frames merged into one burst keep distinct times.
+    """
     rows = []
     if event_time is None:
         event_time = time.time()
 
+    chunk_offsets = [int(o) for o, _t in chunk_times] if chunk_times else []
+    offset = 0
+
     for frame, kind, state in split_capture_buffer(data):
+        frame_time = float(event_time)
+        frame_timestamp = timestamp
+        if chunk_offsets:
+            index = bisect_right(chunk_offsets, offset) - 1
+            if index > 0:
+                frame_time = float(chunk_times[index][1])
+                frame_timestamp = format_clock_time(frame_time)
+        offset += len(frame)
+
         info = decode_frame(frame, kind)
         crc_status = "OK" if state == "OK" else ("ERROR" if state == "ERROR" else "?")
         rows.append({
-            "time": timestamp,
+            "time": frame_timestamp,
             "channel": channel,
             "type": info["kind"],
             "slave": info["slave"],
@@ -374,7 +493,7 @@ def parse_burst(data: bytes, timestamp: str, channel: str = "", event_time=None)
             "one_based": info["one_based"],
             "qty": info["qty"],
             "_frame_len": len(frame),
-            "_epoch": float(event_time),
+            "_epoch": frame_time,
         })
     return rows
 
@@ -390,6 +509,9 @@ class SessionMetrics:
         self.last_event_time = None
         self.pending = {}
         self.requests = 0
+        # Broadcast requests (Slave 0) never receive a response, so they are
+        # never pending and are excluded from the timeout-rate denominator.
+        self.broadcast_requests = 0
         self.responses = 0
         self.timeouts = 0
         self.crc_errors = 0
@@ -494,6 +616,40 @@ class SessionMetrics:
         self.timeouts += 1
         return [event]
 
+    def _resolve_echo_direction(self, row):
+        """Classify a REQ/RESP frame (FC05/06/08/22) as REQUEST or RESPONSE.
+
+        These requests and their normal responses have the same shape, so the
+        parser cannot tell them apart. A frame is the RESPONSE when an older
+        pending request with the same (Slave, FC) exists; for exact-echo FCs
+        the bytes must also be identical. In RS232 dual RX a response must
+        arrive on the opposite channel to its request.
+        """
+        if row.get("crc") != "OK":
+            return row.get("type", "")
+
+        key = self._key(row)
+        if key is None:
+            return row.get("type", "")
+        if key[0] == BROADCAST_UNIT_ID:
+            return "REQUEST"
+
+        pending_list = self.pending.get(key)
+        if pending_list:
+            candidate = pending_list[0]
+            channel = row.get("channel", "")
+            same_direction = (
+                channel in ("A→B", "B→A")
+                and candidate.get("channel") == channel
+            )
+            same_bytes = candidate.get("raw") == row.get("raw")
+            if not same_direction and (
+                key[1] not in EXACT_ECHO_FUNCTION_CODES or same_bytes
+            ):
+                return "RESPONSE"
+
+        return "REQUEST"
+
     def _record_response_time(self, row, response_ms):
         if response_ms is None or row.get("crc") != "OK":
             return
@@ -522,6 +678,9 @@ class SessionMetrics:
             delta_ms = (event_time - self.last_event_time) * 1000.0
         if self.last_event_time is None or event_time >= self.last_event_time:
             self.last_event_time = event_time
+
+        if row.get("type") == "REQ/RESP":
+            row["type"] = self._resolve_echo_direction(row)
 
         row_type = row.get("type", "")
         crc = row.get("crc", "")
@@ -552,13 +711,17 @@ class SessionMetrics:
         if row_type == "REQUEST":
             self.requests += 1
             key = self._key(row)
-            if key is not None and crc == "OK":
+            if key is not None and key[0] == BROADCAST_UNIT_ID:
+                self.broadcast_requests += 1
+            elif key is not None and crc == "OK":
                 self.pending.setdefault(key, []).append({
                     "time": event_time,
                     "seq": row.get("_view_seq"),
                     "pdu_address": row.get("pdu_address"),
                     "one_based": row.get("one_based"),
                     "qty": row.get("qty"),
+                    "channel": row.get("channel", ""),
+                    "raw": row.get("raw", ""),
                 })
 
         elif row_type == "RESPONSE":
@@ -659,9 +822,10 @@ class SessionMetrics:
             100.0 * self.nonvalidated_bytes / self.total_bytes
             if self.total_bytes else 0.0
         )
+        answerable_requests = self.requests - self.broadcast_requests
         timeout_rate = (
-            100.0 * self.timeouts / self.requests
-            if self.requests else 0.0
+            100.0 * self.timeouts / answerable_requests
+            if answerable_requests > 0 else 0.0
         )
 
         try:

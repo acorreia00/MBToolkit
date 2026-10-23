@@ -27,6 +27,7 @@ from mb_diagnostics import (
     inspector_values,
 )
 from mb_i18n import canonical_ui_text, translate_details
+from mb_protocol import read_bits_details
 
 class ViewMixin:
     """Methods for rendering, filtering, statistics and logging."""
@@ -90,7 +91,11 @@ class ViewMixin:
             mappings["health_slowest_var"] = "—"
         else:
             mappings["health_slowest_var"] = (
-                (f"Slave {slowest_slave} — average {summary['slowest_avg_ms']:.1f} ms" if self.current_language == "English" else f"Slave {slowest_slave} — média {summary['slowest_avg_ms']:.1f} ms")
+                self.trf(
+                    "Slave {slave} — média {average:.1f} ms",
+                    slave=slowest_slave,
+                    average=summary["slowest_avg_ms"],
+                )
             )
 
         for attr, value in mappings.items():
@@ -336,15 +341,35 @@ class ViewMixin:
         if not seqs:
             return 0
 
-        changed = 0
+        changed_records = []
         for record in self._frame_history:
             if record.get("seq") in seqs and not record.get("timed_out"):
                 record["timed_out"] = True
-                changed += 1
+                changed_records.append(record)
 
-        if changed and rerender:
-            self.render_filtered_view()
-        return changed
+        if changed_records and rerender:
+            # The "Timeouts" filter changes which rows are visible, so only
+            # then is a full rebuild needed. Otherwise a timeout changes just
+            # the row colour: retag the already visible rows in place.
+            if canonical_ui_text(self.advanced_filter_type_var.get()) == "Timeouts":
+                self.render_filtered_view()
+            else:
+                self.refresh_record_tags(changed_records)
+        return len(changed_records)
+
+    def refresh_record_tags(self, records):
+        """Re-apply the result tag of visible rows without rebuilding the table."""
+        for record in records:
+            row_tag = self.anomaly_tag_for_record(record)
+            for iid in self._tree_iids_by_seq.get(record.get("seq"), []):
+                try:
+                    self.tree.item(iid, tags=((row_tag,) if row_tag else ()))
+                except tk.TclError:
+                    pass
+
+        selected = self.selected_record()
+        if selected is not None and any(selected is record for record in records):
+            self.update_frame_inspector(selected)
 
     def selected_record(self):
         selection = self.tree.selection()
@@ -515,7 +540,7 @@ class ViewMixin:
             if path is None:
                 messagebox.showinfo(
                     self.tr("Exportar CSV"),
-                    ("There are no frames in the current session to export." if self.current_language == "English" else "Não existem frames na sessão atual para exportar."),
+                    self.tr("Não existem frames na sessão atual para exportar."),
                 )
             return None
 
@@ -599,7 +624,7 @@ class ViewMixin:
                 try:
                     messagebox.showinfo(
                         self.tr("Exportar CSV"),
-                        ((f"Session exported to:\n\n{path}") if self.current_language == "English" else f"Sessão exportada para:\n\n{path}"),
+                        self.trf("Sessão exportada para:\n\n{path}", path=path),
                     )
                 except tk.TclError:
                     pass
@@ -608,7 +633,7 @@ class ViewMixin:
         except OSError as exc:
             messagebox.showerror(
                 self.tr("Exportar CSV"),
-                ((f"Could not save the CSV:\n\n{exc}") if self.current_language == "English" else f"Não foi possível guardar o CSV:\n\n{exc}"),
+                self.trf("Não foi possível guardar o CSV:\n\n{error}", error=exc),
             )
             return None
 
@@ -1364,7 +1389,7 @@ class ViewMixin:
         self.raw_text.delete("1.0", "end")
         if block:
             self.raw_text.insert("end", block)
-        self._raw_text_line_count = block.count("\\n")
+        self._raw_text_line_count = block.count("\n")
 
     def render_filtered_view(self):
         # This is intentionally called on user-driven filter/sort changes and
@@ -1470,6 +1495,21 @@ class ViewMixin:
 
             self.register_slave_for_filter(row.get("slave", ""))
 
+            # FC01/FC02: the request Qty tells which bits of the last data
+            # byte are padding, so trim them from the response details.
+            if (
+                matched is not None
+                and row.get("type") == "RESPONSE"
+                and row.get("fc") in ("01", "02")
+            ):
+                try:
+                    row["details"] = read_bits_details(
+                        bytes.fromhex(row.get("raw", "")),
+                        matched.get("qty"),
+                    )
+                except ValueError:
+                    pass
+
             record = {
                 "seq": seq,
                 "epoch": float(row.get("_epoch", time.time())),
@@ -1491,6 +1531,18 @@ class ViewMixin:
                 "matched": matched is not None,
                 "request_seq": (
                     matched.get("seq")
+                    if matched is not None
+                    else None
+                ),
+                # Used only by the Frame Inspector to show the address of
+                # each returned value; RESPONSE Details stay response-native.
+                "request_pdu_address": (
+                    matched.get("pdu_address")
+                    if matched is not None
+                    else None
+                ),
+                "request_qty": (
+                    matched.get("qty")
                     if matched is not None
                     else None
                 ),
@@ -1562,10 +1614,10 @@ class ViewMixin:
 
         if expired_requests:
             # A new frame can itself cause older requests to cross the Pending
-            # timeout. Mark those original REQUEST records before final render.
+            # timeout. Mark those original REQUEST records in place.
             self.mark_timed_out_records(
                 expired_requests,
-                rerender=False,
+                rerender=True,
             )
 
         log_block = "".join(raw_lines_log)
@@ -1578,10 +1630,6 @@ class ViewMixin:
 
         self.update_stats_labels()
         rebuilt = self.prune_ui_history()
-
-        if expired_requests and not rebuilt:
-            self.render_filtered_view()
-            rebuilt = True
 
         if tree_layout_changed and not rebuilt:
             self.render_filtered_view()
@@ -1703,9 +1751,12 @@ class ViewMixin:
             self.log_file = None
             self.log_path = None
             messagebox.showerror(
-                ("Error creating log" if self.current_language == "English" else "Erro ao criar log"),
-                (("Traffic was detected, but the log file could not be created at:\n\n") if self.current_language == "English" else "Foi detetado tráfego, mas não foi possível criar o ficheiro de log em:\n\n")
-                + f"{get_logs_folder()}\n\n{exc}"
+                self.tr("Erro ao criar log"),
+                self.trf(
+                    "Foi detetado tráfego, mas não foi possível criar o ficheiro de log em:\n\n{folder}\n\n{error}",
+                    folder=get_logs_folder(),
+                    error=exc,
+                )
             )
             return False
 

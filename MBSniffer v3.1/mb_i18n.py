@@ -6,6 +6,8 @@ kept here so switching language never mutates protocol data or application
 logic.
 """
 
+from mb_config import DISCOVERY_IDLE_CHECK_SECONDS, SNIFFER_SPLIT_FRAME_HOLD_MS
+
 LANGUAGE_PORTUGUESE = "Português"
 LANGUAGE_ENGLISH = "English"
 LANGUAGE_CHOICES = (LANGUAGE_PORTUGUESE, LANGUAGE_ENGLISH)
@@ -118,7 +120,7 @@ PT_TO_EN = {
     "Pesquisa ativa — transmite no barramento": "Active scan — transmits on the bus",
     "Esta ferramenta atua temporariamente como master Modbus RTU e envia apenas pedidos de leitura. Não a utilizes com outro master ativo no mesmo barramento.": "This tool temporarily acts as a Modbus RTU master and sends read requests only. Do not use it while another master is active on the same bus.",
     "Confirmo que não existe outro master ativo no barramento.": "I confirm that no other master is active on the bus.",
-    "FC03 é o modo rápido. Uma resposta normal OU uma Modbus Exception com CRC válido conta como slave encontrado. Ativa FC04 fallback apenas para dispositivos que possam ignorar FC03 sem devolver Exception. Device Identification envia FC43/14 apenas aos slaves encontrados e tenta ler VendorName, ProductCode e Revision.": "FC03 is the fast mode. A normal response OR a CRC-valid Modbus Exception counts as a found Slave. Enable FC04 fallback only for devices that may ignore FC03 without returning an Exception. Device Identification sends FC43/14 only to found Slaves and attempts to read VendorName, ProductCode and Revision.",
+    "FC03 é o modo rápido. Uma resposta normal OU uma Modbus Exception com CRC válido conta como slave encontrado. Ativa FC04 fallback apenas para dispositivos que possam ignorar FC03 sem devolver Exception. Device Identification envia FC43/14 apenas aos slaves encontrados e tenta ler VendorName, ProductCode e Revision. Tentativas repete cada pedido sem resposta. Antes de transmitir, a pesquisa escuta o barramento durante 1 s e não arranca se detetar tráfego.": "FC03 is the fast mode. A normal response OR a CRC-valid Modbus Exception counts as a found Slave. Enable FC04 fallback only for devices that may ignore FC03 without returning an Exception. Device Identification sends FC43/14 only to found Slaves and attempts to read VendorName, ProductCode and Revision. Attempts repeats every unanswered request. Before transmitting, the scan listens to the bus for 1 s and does not start if traffic is detected.",
     "Configuração da pesquisa": "Scan configuration",
     "Porta COM": "COM port",
     "A porta série não aceitou bytes para transmissão.": "The serial port did not accept bytes for transmission.",
@@ -142,6 +144,49 @@ PT_TO_EN = {
     "Decrescente — recente → antigo": "Descending — newest → oldest",
     "Todos os ficheiros": "All files",
     "Exportar sessão para CSV": "Export session to CSV",
+    # Messages with live values (templates used with SnifferApp.trf()).
+    'Seleciona a COM A.': 'Select COM A.',
+    'Seleciona também a COM B.': 'Select COM B as well.',
+    'COM A e COM B têm de ser diferentes.': 'COM A and COM B must be different.',
+    'pyserial não está instalado.': 'pyserial is not installed.',
+    'Não foi possível reiniciar a porta COM:\n\n{error}': 'Could not restart the COM port:\n\n{error}',
+    'Não foi possível reabrir a porta COM. A captura foi parada.\n\n{error}': 'Could not reopen the COM port. Capture was stopped.\n\n{error}',
+    'Pending timeout inválido.': 'Invalid Pending timeout.',
+    'Pending timeout deve estar entre {minimum:g} e {maximum:g} segundos.': 'Pending timeout must be between {minimum:g} and {maximum:g} seconds.',
+    'Frame gap manual inválido.': 'Invalid manual Frame gap.',
+    'pyserial não está instalado.\n\nO build_exe.bat inclui-o automaticamente no EXE.': 'pyserial is not installed.\n\nbuild_exe.bat includes it automatically in the EXE.',
+    'Ocorreu um erro ao processar eventos da interface. O processamento continuará.\n\n{error}': 'An error occurred while processing interface events. Processing will continue.\n\n{error}',
+    'Slave {slave} — média {average:.1f} ms': 'Slave {slave} — average {average:.1f} ms',
+    'Não existem frames na sessão atual para exportar.': 'There are no frames in the current session to export.',
+    'Sessão exportada para:\n\n{path}': 'Session exported to:\n\n{path}',
+    'Não foi possível guardar o CSV:\n\n{error}': 'Could not save the CSV:\n\n{error}',
+    'Erro ao criar log': 'Error creating log',
+    'Foi detetado tráfego, mas não foi possível criar o ficheiro de log em:\n\n{folder}\n\n{error}': 'Traffic was detected, but the log file could not be created at:\n\n{folder}\n\n{error}',
+    'Os Slave IDs têm de estar entre 1 e 247.': 'Slave IDs must be between 1 and 247.',
+    'O Slave ID inicial não pode ser superior ao final.': 'The starting Slave ID cannot be greater than the ending Slave ID.',
+    'O timeout mínimo tem de estar entre {minimum} e {maximum} ms.': 'The minimum timeout must be between {minimum} and {maximum} ms.',
+    'Tentativas tem de estar entre {minimum} e {maximum}.': 'Attempts must be between {minimum} and {maximum}.',
+    'Tentativas': 'Attempts',
+    'Máx. estimado: —': 'Estimated max.: —',
+    ' (com {options})': ' (with {options})',
+    '{configs} config. × {slaves} slaves — máx. estimado: {duration}': '{configs} config. × {slaves} slaves — estimated max.: {duration}',
+    'Encontrados: {count}': 'Found: {count}',
+    'pyserial não está instalado. O build_exe.bat inclui-o automaticamente no EXE.': 'pyserial is not installed. build_exe.bat includes it automatically in the EXE.',
+    'Confirma primeiro que não existe outro master ativo no barramento.': 'First confirm that no other master is active on the bus.',
+    'Seleciona uma porta COM.': 'Select a COM port.',
+    'Seleciona pelo menos uma configuração série.': 'Select at least one serial configuration.',
+    'Não foi possível iniciar a thread de pesquisa:\n\n{error}': 'Could not start the scan thread:\n\n{error}',
+    'A configurar {baud} / {config}…': 'Configuring {baud} / {config}…',
+    'Foi detetado tráfego em {port} antes de transmitir ({count} bytes: {raw}). Pode existir outro master ativo no barramento; a pesquisa não foi iniciada.': 'Traffic was detected on {port} before transmitting ({count} bytes: {raw}). Another master may be active on the bus; the scan was not started.',
+    'A verificar se o barramento está livre…': 'Checking that the bus is idle…',
+    'Não foi possível abrir {port} em {baud} / {config}: {error}': 'Could not open {port} at {baud} / {config}: {error}',
+    'Falha ao preparar a receção em {context}: {error}': 'Failed to prepare reception at {context}: {error}',
+    'Falha ao transmitir em {context}: {error}': 'Failed to transmit at {context}: {error}',
+    'Falha ao receber em {context}: {error}': 'Failed to receive at {context}: {error}',
+    'Falha em Device Identification em {context}: {error}': 'Device Identification failed at {context}: {error}',
+    'Decorrido {elapsed} — restante ~{remaining}': 'Elapsed {elapsed} — remaining ~{remaining}',
+    'Pesquisa parada — {found} encontrados — {elapsed}': 'Scan stopped — {found} found — {elapsed}',
+    'Pesquisa concluída — {found} encontrados — {elapsed}': 'Scan complete — {found} found — {elapsed}',
 }
 
 EN_TO_PT = {english: portuguese for portuguese, english in PT_TO_EN.items()}
@@ -181,13 +226,23 @@ def translate_text(text, language):
     return canonical
 
 
+# Human-readable fragments embedded in protocol Details / Inspector data.
+DETAIL_FRAGMENTS_PT_TO_EN = (
+    ("Registos (PDU Address=valor):", "Registers (PDU Address=value):"),
+    ("Bits (PDU Address=valor):", "Bits (PDU Address=value):"),
+    ("Registos=", "Registers="),
+)
+
+
 def translate_details(text, language):
     """Translate only human-readable fragments embedded in protocol details."""
     value = str(text or "")
     if normalize_language(language) == LANGUAGE_ENGLISH:
-        value = value.replace("Registos=", "Registers=")
+        for portuguese, english in DETAIL_FRAGMENTS_PT_TO_EN:
+            value = value.replace(portuguese, english)
     else:
-        value = value.replace("Registers=", "Registos=")
+        for portuguese, english in DETAIL_FRAGMENTS_PT_TO_EN:
+            value = value.replace(english, portuguese)
     return value
 
 
@@ -248,14 +303,18 @@ def english_help_blocks(max_ui_frames_text, max_raw_lines_text,
         ("heading", "Frame gap\n"),
         (None, "In Auto mode, MBSniffer uses 3.5 character times up to and including 19200 bit/s. Above 19200 bit/s it uses the fixed 1.750 ms t3.5 recommended for Modbus RTU. Manual mode allows another millisecond value to be used when diagnosing equipment or drivers with particular behavior.\n"),
         (None, "USB adapters and Windows may group bytes and introduce latency. MBSniffer timestamps are therefore useful for sequence diagnostics and relative timing, but they do not replace a logic analyzer when high-precision timing measurements are required.\n"),
+        (None, f"When a burst ends with the start of a known frame that is still incomplete, MBSniffer waits up to {SNIFFER_SPLIT_FRAME_HOLD_MS:g} ms more before closing it. A frame split in two by the USB adapter therefore does not appear as RAW. Frames merged into one burst keep the arrival time of their own block of bytes.\n"),
 
         ("heading", "Pending timeout\n"),
         (None, "Defines how long a CRC-valid REQUEST may remain waiting for a matchable RESPONSE/EXCEPTION. When it expires, the original REQUEST is marked as timeout and the Timeout/Timeout rate counters increase.\n"),
         (None, f"Allowed range: {min_pending:g} to {max_pending:g} s. The value should be greater than the normal maximum response time of the installation to avoid false timeouts.\n"),
+        (None, "Broadcast requests (Slave 0) never have a response by definition: they are not kept pending, never count as a timeout and are excluded from the Timeout rate.\n"),
 
         ("heading", "How to read the Traffic table\n"),
         ("bullet", "• REQUEST — Modbus RTU request recognized by the parser.\n"),
         ("bullet", "• RESPONSE — recognized Modbus RTU response that is not an EXCEPTION.\n"),
+        ("bullet", "• FC05/FC06/FC08/FC22 — the request and the response have the same format. The frame is a RESPONSE when a pending request from the same Slave/FC exists (for FC05/06/22 the bytes must be identical; in RS232 dual RX it must come from the opposite channel). Otherwise it is a REQUEST.\n"),
+        ("bullet", "• FC01/FC02 responses show the bits in address order, grouped per byte. In Frame Inspector, matched read responses (FC01–FC04) show the PDU Address of every value.\n"),
         ("bullet", "• EXCEPTION — Modbus response with an exception Function Code (bit 7 set). Details shows the code and normalized description.\n"),
         ("bullet", "• CRC OK — received CRC matches the calculated CRC.\n"),
         ("bullet", "• CRC ERROR — the structure resembles a supported frame, but the received CRC does not match the calculated CRC.\n"),
@@ -360,6 +419,7 @@ def english_help_blocks(max_ui_frames_text, max_raw_lines_text,
         (None, "Bus Slave Finder transmits Modbus RTU requests, so it is not passive. Before starting, confirm that no other master is active on the same bus.\n"),
         (None, "Select COM, baud rates, parities, stop bits and the Slave ID range. Data bits is fixed at 8. The scan tries FC03 Address 0 Qty 1; either a normal response or a CRC-valid Modbus Exception confirms that the Slave exists.\n"),
         (None, "FC04 fallback is optional and increases the maximum number of attempts. The minimum timeout is adapted to baud rate. A write timeout means transmission through the port/driver failed and must not be interpreted simply as “slave did not respond”.\n"),
+        (None, f"Attempts (1 to 3) repeats every unanswered request before moving on to the next Slave. Before the first transmission, the scan listens to the bus for {DISCOVERY_IDLE_CHECK_SECONDS:g} s; if any byte is received, it does not transmit and reports that another master may be active.\n"),
         (None, "Device Identification (FC43/14) is optional. When enabled, it is sent only after a Slave has been found and attempts to read Basic Device Identification: VendorName, ProductCode and MajorMinorRevision. An Exception or no response to FC43/14 does not invalidate Slave discovery.\n"),
         (None, "Finder and Sniffer share the global activity lock so the same application cannot actively scan and capture at the same time.\n"),
 

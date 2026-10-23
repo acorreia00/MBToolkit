@@ -18,6 +18,10 @@ from mb_config import (
     DISCOVERY_WRITE_TIMEOUT_SECONDS,
     DISCOVERY_WRITE_RETRIES,
     DISCOVERY_RX_BUFFER_LIMIT,
+    DISCOVERY_MIN_ATTEMPTS,
+    DISCOVERY_MAX_ATTEMPTS,
+    DISCOVERY_DEFAULT_ATTEMPTS,
+    DISCOVERY_IDLE_CHECK_SECONDS,
     MODBUS_EXCEPTION_CODES,
 )
 from mb_protocol import (
@@ -402,6 +406,27 @@ def read_discovery_response(ser, slave, fc, timeout_s, stop_event):
 
     return find_discovery_response(buffer, slave, fc)
 
+def bus_activity_detected(ser, listen_s, stop_event):
+    """Listen passively for *listen_s* seconds; return the bytes received.
+
+    Any byte, even one framed at another baud rate, means something else is
+    transmitting, so the active scan must not start.
+    """
+    deadline = time.perf_counter() + max(0.0, float(listen_s))
+    received = bytearray()
+    while time.perf_counter() < deadline:
+        if stop_event.is_set():
+            break
+        waiting = int(getattr(ser, "in_waiting", 0) or 0)
+        if waiting:
+            received.extend(ser.read(waiting) or b"")
+            if received:
+                break
+        elif stop_event.wait(0.005):
+            break
+    return bytes(received)
+
+
 def cancel_serial_io(ser):
     """Best-effort cancellation of pending serial I/O."""
     if ser is None:
@@ -607,6 +632,22 @@ class SlaveFinderMixin:
             text="Probe: FC03 / Address 0 / Qty 1",
         ).grid(row=0, column=5, sticky="w")
 
+        ttk.Label(top_row, text="Tentativas").grid(
+            row=0, column=6, sticky="w", padx=(28, 4)
+        )
+        self.discovery_attempts_var = tk.StringVar(
+            value=finder_saved.get("attempts", str(DISCOVERY_DEFAULT_ATTEMPTS))
+        )
+        self.discovery_attempts_spin = ttk.Spinbox(
+            top_row,
+            from_=DISCOVERY_MIN_ATTEMPTS,
+            to=DISCOVERY_MAX_ATTEMPTS,
+            increment=1,
+            width=4,
+            textvariable=self.discovery_attempts_var,
+        )
+        self.discovery_attempts_spin.grid(row=0, column=7, sticky="w")
+
         # Baud-rate checkboxes. Defaults keep a normal industrial scan quick.
         baud_frame = ttk.LabelFrame(options, text="Baud rate")
         baud_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
@@ -734,6 +775,7 @@ class SlaveFinderMixin:
             self.discovery_slave_start_var,
             self.discovery_slave_end_var,
             self.discovery_min_timeout_var,
+            self.discovery_attempts_var,
             self.discovery_fc04_fallback_var,
             self.discovery_device_identification_var,
         ):
@@ -745,7 +787,9 @@ class SlaveFinderMixin:
                 "FC03 é o modo rápido. Uma resposta normal OU uma Modbus Exception com CRC válido "
                 "conta como slave encontrado. Ativa FC04 fallback apenas para dispositivos que "
                 "possam ignorar FC03 sem devolver Exception. Device Identification envia FC43/14 "
-                "apenas aos slaves encontrados e tenta ler VendorName, ProductCode e Revision."
+                "apenas aos slaves encontrados e tenta ler VendorName, ProductCode e Revision. "
+                "Tentativas repete cada pedido sem resposta. Antes de transmitir, a pesquisa escuta "
+                "o barramento durante 1 s e não arranca se detetar tráfego."
             ),
             wraplength=1120,
         ).grid(row=3, column=0, sticky="w", padx=10, pady=(4, 8))
@@ -918,18 +962,32 @@ class SlaveFinderMixin:
         start = int(self.discovery_slave_start_var.get())
         end = int(self.discovery_slave_end_var.get())
         if not (1 <= start <= 247 and 1 <= end <= 247):
-            raise ValueError("Slave IDs must be between 1 and 247." if self.current_language == "English" else "Os Slave IDs têm de estar entre 1 e 247.")
+            raise ValueError(self.tr("Os Slave IDs têm de estar entre 1 e 247."))
         if start > end:
-            raise ValueError("The starting Slave ID cannot be greater than the ending Slave ID." if self.current_language == "English" else "O Slave ID inicial não pode ser superior ao final.")
+            raise ValueError(self.tr("O Slave ID inicial não pode ser superior ao final."))
         return list(range(start, end + 1))
 
     def selected_discovery_min_timeout_ms(self):
         value = float(self.discovery_min_timeout_var.get())
         if not (DISCOVERY_MIN_TIMEOUT_MS <= value <= DISCOVERY_MAX_TIMEOUT_MS):
             raise ValueError(
-                (f"The minimum timeout must be between {DISCOVERY_MIN_TIMEOUT_MS} and {DISCOVERY_MAX_TIMEOUT_MS} ms."
-                 if self.current_language == "English" else
-                 f"O timeout mínimo tem de estar entre {DISCOVERY_MIN_TIMEOUT_MS} e {DISCOVERY_MAX_TIMEOUT_MS} ms.")
+                self.trf(
+                    "O timeout mínimo tem de estar entre {minimum} e {maximum} ms.",
+                    minimum=DISCOVERY_MIN_TIMEOUT_MS,
+                    maximum=DISCOVERY_MAX_TIMEOUT_MS,
+                )
+            )
+        return value
+
+    def selected_discovery_attempts(self):
+        value = int(self.discovery_attempts_var.get())
+        if not (DISCOVERY_MIN_ATTEMPTS <= value <= DISCOVERY_MAX_ATTEMPTS):
+            raise ValueError(
+                self.trf(
+                    "Tentativas tem de estar entre {minimum} e {maximum}.",
+                    minimum=DISCOVERY_MIN_ATTEMPTS,
+                    maximum=DISCOVERY_MAX_ATTEMPTS,
+                )
             )
         return value
 
@@ -942,8 +1000,9 @@ class SlaveFinderMixin:
             configs = self.selected_discovery_configs()
             slaves = self.selected_discovery_slaves()
             minimum_timeout_ms = self.selected_discovery_min_timeout_ms()
+            attempts = self.selected_discovery_attempts()
         except Exception:
-            self.discovery_estimate_var.set("Estimated max.: —" if self.current_language == "English" else "Máx. estimado: —")
+            self.discovery_estimate_var.set(self.tr("Máx. estimado: —"))
             self.discovery_progress_text_var.set("0 / 0")
             return
 
@@ -959,7 +1018,8 @@ class SlaveFinderMixin:
                     baud, parity, stopbits, minimum_timeout_ms
                 )
             )
-            seconds += len(slaves) * probes_per_unit * per_probe
+            # Worst case: no Slave answers, so every probe uses all attempts.
+            seconds += len(slaves) * probes_per_unit * attempts * per_probe
             if identify_devices:
                 # Worst case: every probed Slave exists and therefore receives
                 # one optional Basic Device Identification query.
@@ -972,6 +1032,7 @@ class SlaveFinderMixin:
                     )
                 )
             seconds += 0.025  # small reopen/reconfigure allowance
+        seconds += DISCOVERY_IDLE_CHECK_SECONDS if configs else 0.0
 
         self.discovery_progress_text_var.set(f"0 / {total_units}")
         suffix_parts = []
@@ -979,11 +1040,18 @@ class SlaveFinderMixin:
             suffix_parts.append("FC04 fallback")
         if identify_devices:
             suffix_parts.append("Device Identification")
-        suffix = ((f" (with {' + '.join(suffix_parts)})" if self.current_language == "English" else f" (com {' + '.join(suffix_parts)})") if suffix_parts else "")
+        suffix = (
+            self.trf(" (com {options})", options=" + ".join(suffix_parts))
+            if suffix_parts else ""
+        )
         self.discovery_estimate_var.set(
-            (f"{len(configs)} config. × {len(slaves)} slaves — estimated max.: {format_duration(seconds)}{suffix}"
-             if self.current_language == "English" else
-             f"{len(configs)} config. × {len(slaves)} slaves — máx. estimado: {format_duration(seconds)}{suffix}")
+            self.trf(
+                "{configs} config. × {slaves} slaves — máx. estimado: {duration}",
+                configs=len(configs),
+                slaves=len(slaves),
+                duration=format_duration(seconds),
+            )
+            + suffix
         )
 
     def update_discovery_start_state(self):
@@ -999,6 +1067,7 @@ class SlaveFinderMixin:
             enabled = enabled and bool(self.selected_discovery_configs())
             self.selected_discovery_slaves()
             self.selected_discovery_min_timeout_ms()
+            self.selected_discovery_attempts()
         except Exception:
             enabled = False
         self.discovery_start_btn.configure(state="normal" if enabled else "disabled")
@@ -1009,7 +1078,7 @@ class SlaveFinderMixin:
         for iid in self.discovery_tree.get_children():
             self.discovery_tree.delete(iid)
         self.discovery_found_count = 0
-        self.discovery_found_var.set("Found: 0" if self.current_language == "English" else "Encontrados: 0")
+        self.discovery_found_var.set(self.trf("Encontrados: {count}", count=0))
         self.discovery_progress_var.set(0.0)
         self.discovery_status_var.set(self.tr("Parado"))
         self.update_discovery_estimate()
@@ -1062,26 +1131,27 @@ class SlaveFinderMixin:
         if serial is None:
             messagebox.showerror(
                 self.tr("pyserial em falta"),
-                ("pyserial is not installed. build_exe.bat includes it automatically in the EXE." if self.current_language == "English" else "pyserial não está instalado. O build_exe.bat inclui-o automaticamente no EXE.")
+                self.tr("pyserial não está instalado. O build_exe.bat inclui-o automaticamente no EXE.")
             )
             return
 
         if not self.discovery_safety_var.get():
             messagebox.showwarning(
                 self.tr("Pesquisa ativa"),
-                ("First confirm that no other master is active on the bus." if self.current_language == "English" else "Confirma primeiro que não existe outro master ativo no barramento.")
+                self.tr("Confirma primeiro que não existe outro master ativo no barramento.")
             )
             return
 
         try:
             port = self.discovery_port_var.get().strip()
             if not port:
-                raise ValueError("Select a COM port." if self.current_language == "English" else "Seleciona uma porta COM.")
+                raise ValueError(self.tr("Seleciona uma porta COM."))
             configs = self.selected_discovery_configs()
             if not configs:
-                raise ValueError("Select at least one serial configuration." if self.current_language == "English" else "Seleciona pelo menos uma configuração série.")
+                raise ValueError(self.tr("Seleciona pelo menos uma configuração série."))
             slaves = self.selected_discovery_slaves()
             minimum_timeout_ms = self.selected_discovery_min_timeout_ms()
+            attempts = self.selected_discovery_attempts()
         except Exception as exc:
             messagebox.showerror(self.tr("Configuração inválida"), str(exc))
             return
@@ -1117,7 +1187,7 @@ class SlaveFinderMixin:
             target=self.discovery_worker,
             args=(
                 serial, port, immutable_configs, immutable_slaves,
-                minimum_timeout_ms, fallback_fc04, identify_devices
+                minimum_timeout_ms, fallback_fc04, identify_devices, attempts
             ),
             daemon=True,
         )
@@ -1140,8 +1210,10 @@ class SlaveFinderMixin:
             self.update_discovery_start_state()
             messagebox.showerror(
                 self.tr("Erro na Bus Slave Finder"),
-                (("Could not start the scan thread:\n\n") if self.current_language == "English" else "Não foi possível iniciar a thread de pesquisa:\n\n")
-                + f"{type(exc).__name__}: {self.tr(str(exc))}"
+                self.trf(
+                    "Não foi possível iniciar a thread de pesquisa:\n\n{error}",
+                    error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                )
             )
 
     def stop_discovery_scan(self):
@@ -1155,7 +1227,7 @@ class SlaveFinderMixin:
 
     def discovery_worker(
         self, serial, port, configs, slaves, minimum_timeout_ms, fallback_fc04,
-        identify_devices
+        identify_devices, attempts=DISCOVERY_DEFAULT_ATTEMPTS
     ):
         started = time.perf_counter()
         total_units = len(configs) * len(slaves)
@@ -1163,6 +1235,7 @@ class SlaveFinderMixin:
         found_count = 0
         fatal_error = None
         context = str(port)
+        idle_checked = False
 
         try:
             for baud, parity, stopbits in configs:
@@ -1173,7 +1246,11 @@ class SlaveFinderMixin:
                 context = f"{port} — {baud} / {config_label}"
                 self.event_queue.put((
                     "discovery_status",
-                    (f"Configuring {baud} / {config_label}…" if self.current_language == "English" else f"A configurar {baud} / {config_label}…")
+                    self.trf(
+                        "A configurar {baud} / {config}…",
+                        baud=baud,
+                        config=config_label,
+                    )
                 ))
 
                 ser = None
@@ -1184,13 +1261,53 @@ class SlaveFinderMixin:
                         )
                     except Exception as exc:
                         raise RuntimeError(
-                            ((f"Could not open {port} at {baud} / {config_label}: ") if self.current_language == "English" else f"Não foi possível abrir {port} em {baud} / {config_label}: ")
-                            + f"{type(exc).__name__}: {self.tr(str(exc))}"
+                            self.trf(
+                                "Não foi possível abrir {port} em {baud} / {config}: {error}",
+                                port=port,
+                                baud=baud,
+                                config=config_label,
+                                error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                            )
                         ) from exc
 
                     self.discovery_serial = ser
                     if self.discovery_stop_event.wait(0.025):
                         break
+
+                    if not idle_checked:
+                        # Last line of defence behind the safety checkbox:
+                        # never transmit onto a bus that is already busy.
+                        idle_checked = True
+                        self.event_queue.put((
+                            "discovery_status",
+                            self.tr("A verificar se o barramento está livre…"),
+                        ))
+                        traffic = bus_activity_detected(
+                            ser,
+                            DISCOVERY_IDLE_CHECK_SECONDS,
+                            self.discovery_stop_event,
+                        )
+                        if traffic:
+                            raise RuntimeError(
+                                self.trf(
+                                    "Foi detetado tráfego em {port} antes de transmitir "
+                                    "({count} bytes: {raw}). Pode existir outro master "
+                                    "ativo no barramento; a pesquisa não foi iniciada.",
+                                    port=port,
+                                    count=len(traffic),
+                                    raw=hex_bytes(traffic[:16]),
+                                )
+                            )
+                        if self.discovery_stop_event.is_set():
+                            break
+                        self.event_queue.put((
+                            "discovery_status",
+                            self.trf(
+                                "A configurar {baud} / {config}…",
+                                baud=baud,
+                                config=config_label,
+                            ),
+                        ))
 
                     response_timeout_s = discovery_response_timeout_seconds(
                         baud, parity, stopbits, minimum_timeout_ms
@@ -1208,7 +1325,12 @@ class SlaveFinderMixin:
                         elapsed_ms = None
                         probe_fcs = [3, 4] if fallback_fc04 else [3]
 
-                        for fc in probe_fcs:
+                        probe_plan = [
+                            (fc, attempt)
+                            for fc in probe_fcs
+                            for attempt in range(1, attempts + 1)
+                        ]
+                        for fc, attempt in probe_plan:
                             if self.discovery_stop_event.is_set():
                                 break
 
@@ -1216,6 +1338,8 @@ class SlaveFinderMixin:
                                 f"{port} — {baud} / {config_label} / "
                                 f"Slave {slave} / FC{fc:02X}"
                             )
+                            if attempts > 1:
+                                context += f" / {attempt}/{attempts}"
 
                             # If this fails, the COM/driver is unhealthy. Do not
                             # disguise it as a normal no-response slave timeout.
@@ -1223,8 +1347,11 @@ class SlaveFinderMixin:
                                 ser.reset_input_buffer()
                             except Exception as exc:
                                 raise RuntimeError(
-                                    ((f"Failed to prepare reception at {context}: ") if self.current_language == "English" else f"Falha ao preparar a receção em {context}: ")
-                                    + f"{type(exc).__name__}: {self.tr(str(exc))}"
+                                    self.trf(
+                                        "Falha ao preparar a receção em {context}: {error}",
+                                        context=context,
+                                        error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                    )
                                 ) from exc
 
                             request = build_discovery_probe(slave, fc)
@@ -1236,8 +1363,11 @@ class SlaveFinderMixin:
                                 )
                             except Exception as exc:
                                 raise RuntimeError(
-                                    ((f"Failed to transmit at {context}: ") if self.current_language == "English" else f"Falha ao transmitir em {context}: ")
-                                    + f"{type(exc).__name__}: {self.tr(str(exc))}"
+                                    self.trf(
+                                        "Falha ao transmitir em {context}: {error}",
+                                        context=context,
+                                        error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                    )
                                 ) from exc
 
                             if not sent or self.discovery_stop_event.is_set():
@@ -1250,8 +1380,11 @@ class SlaveFinderMixin:
                                 )
                             except Exception as exc:
                                 raise RuntimeError(
-                                    ((f"Failed to receive at {context}: ") if self.current_language == "English" else f"Falha ao receber em {context}: ")
-                                    + f"{type(exc).__name__}: {self.tr(str(exc))}"
+                                    self.trf(
+                                        "Falha ao receber em {context}: {error}",
+                                        context=context,
+                                        error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                    )
                                 ) from exc
 
                             if result is not None:
@@ -1295,8 +1428,11 @@ class SlaveFinderMixin:
                                     )
                                 except Exception as exc:
                                     raise RuntimeError(
-                                        ((f"Device Identification failed at {context}: ") if self.current_language == "English" else f"Falha em Device Identification em {context}: ")
-                                        + f"{type(exc).__name__}: {self.tr(str(exc))}"
+                                        self.trf(
+                                            "Falha em Device Identification em {context}: {error}",
+                                            context=context,
+                                            error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                        )
                                     ) from exc
                                 device_id_text = format_device_identification(
                                     device_result
@@ -1378,16 +1514,20 @@ class SlaveFinderMixin:
             f"{completed} / {payload['total']} — "
             f"{payload['baud']} / {payload['config']} / Slave {payload['slave']}"
         )
-        self.discovery_found_var.set((f"Found: {payload['found']}" if self.current_language == "English" else f"Encontrados: {payload['found']}"))
+        self.discovery_found_var.set(self.trf("Encontrados: {count}", count=payload["found"]))
         self.discovery_status_var.set(
-            (f"Elapsed {format_duration(payload['elapsed'])} — remaining ~{format_duration(payload['eta'])}"
-             if self.current_language == "English" else
-             f"Decorrido {format_duration(payload['elapsed'])} — restante ~{format_duration(payload['eta'])}")
+            self.trf(
+                "Decorrido {elapsed} — restante ~{remaining}",
+                elapsed=format_duration(payload["elapsed"]),
+                remaining=format_duration(payload["eta"]),
+            )
         )
 
     def add_discovery_result(self, payload):
         self.discovery_found_count += 1
-        self.discovery_found_var.set((f"Found: {self.discovery_found_count}" if self.current_language == "English" else f"Encontrados: {self.discovery_found_count}"))
+        self.discovery_found_var.set(
+            self.trf("Encontrados: {count}", count=self.discovery_found_count)
+        )
         self.discovery_tree.insert(
             "", "end",
             values=(
@@ -1425,14 +1565,20 @@ class SlaveFinderMixin:
             messagebox.showerror(self.tr("Erro na Bus Slave Finder"), payload["error"])
         elif payload.get("stopped"):
             self.discovery_status_var.set(
-                ((f"Scan stopped — {payload['found']} found — ") if self.current_language == "English" else f"Pesquisa parada — {payload['found']} encontrados — ")
-                + f"{format_duration(payload['elapsed'])}"
+                self.trf(
+                    "Pesquisa parada — {found} encontrados — {elapsed}",
+                    found=payload["found"],
+                    elapsed=format_duration(payload["elapsed"]),
+                )
             )
         else:
             self.discovery_progress_var.set(100.0)
             self.discovery_status_var.set(
-                ((f"Scan complete — {payload['found']} found — ") if self.current_language == "English" else f"Pesquisa concluída — {payload['found']} encontrados — ")
-                + f"{format_duration(payload['elapsed'])}"
+                self.trf(
+                    "Pesquisa concluída — {found} encontrados — {elapsed}",
+                    found=payload["found"],
+                    elapsed=format_duration(payload["elapsed"]),
+                )
             )
 
         self.update_discovery_estimate()

@@ -9,11 +9,12 @@
 - Captura passiva Modbus RTU em RS485 2-wire e RS232;
 - Identificação de pedidos, respostas, exceções, erros de CRC e dados RAW;
 - Inspetor de Frame com endereços, quantidades, dados e CRC;
+- Respostas de leitura com o endereço de cada registo, coil ou entrada;
 - Emparelhamento pedido/resposta e medição do tempo de resposta;
 - Bus Health com estatísticas, tempos de resposta, timeouts e percentagem de bytes não validados;
 - Filtros de tráfego, pesquisa, realce de anomalias e exportação para CSV;
 - Registo completo das capturas reais em TXT;
-- **Bus Slave Finder** para pesquisa ativa de Slave IDs, com Device Identification (FC43/14) opcional e aviso de segurança;
+- **Bus Slave Finder** para pesquisa ativa de Slave IDs, com tentativas configuráveis, Device Identification (FC43/14) opcional, aviso de segurança e verificação automática de barramento livre;
 - Interface em **Português** e **English**, selecionável em tempo real;
 - Modos claro e escuro com preferências persistentes.
 
@@ -27,6 +28,6 @@ Requer **Windows 10/11 x64**. Depois de extrair o pacote, executar:
 MBSniffer.bat
 ```
 
-O ficheiro de arranque verifica Python e instala `pyserial` quando necessário. Para criar o executável autónomo, utilizar `MBSniffer v3.0\build_exe.bat`.
+O ficheiro de arranque verifica Python e instala `pyserial` quando necessário. Para criar o executável autónomo, utilizar `MBSniffer v3.1\build_exe.bat`.
 
 A aplicação guarda a linguagem, o modo claro/escuro e as restantes preferências em `%APPDATA%\MBSniffer\settings.json`. A porta COM escolhida não fica guardada: sempre que iniciar o programa, deve selecionar novamente a porta que pretende utilizar.

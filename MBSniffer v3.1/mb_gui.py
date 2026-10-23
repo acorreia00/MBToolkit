@@ -13,11 +13,13 @@ from mb_config import (
     APP_NAME,
     APP_VERSION,
     DEFAULT_PENDING_REQUEST_TIMEOUT_SECONDS,
+    DISCOVERY_IDLE_CHECK_SECONDS,
     MAX_PENDING_REQUEST_TIMEOUT_SECONDS,
     MAX_RAW_TEXT_LINES,
     MAX_UI_FRAMES,
     MIN_PENDING_REQUEST_TIMEOUT_SECONDS,
     SLOW_RESPONSE_THRESHOLD_MS,
+    SNIFFER_SPLIT_FRAME_HOLD_MS,
     debug_sim,
     load_ui_settings,
     resource_path,
@@ -709,6 +711,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                     "slave_start": self.discovery_slave_start_var.get(),
                     "slave_end": self.discovery_slave_end_var.get(),
                     "min_timeout_ms": self.discovery_min_timeout_var.get(),
+                    "attempts": self.discovery_attempts_var.get(),
                     "fc04_fallback": bool(
                         self.discovery_fc04_fallback_var.get()
                     ),
@@ -1970,6 +1973,12 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "e tempos relativos, mas não substituem um analisador lógico quando são "
             "necessárias medições temporais de elevada precisão.\n"
         )
+        h(
+            "Quando um burst termina com o início de um frame conhecido ainda incompleto, "
+            f"o MBSniffer espera até {SNIFFER_SPLIT_FRAME_HOLD_MS:g} ms adicionais antes de o "
+            "fechar. Assim, um frame partido em dois pelo adaptador USB não aparece como RAW. "
+            "Frames juntos no mesmo burst mantêm a hora de chegada do seu próprio bloco de bytes.\n"
+        )
 
         h("Pending timeout\n", "heading")
         h(
@@ -1982,10 +1991,27 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             f"{MAX_PENDING_REQUEST_TIMEOUT_SECONDS:g} s. O valor deve ser superior ao "
             "tempo de resposta máximo normal da instalação para evitar falsos timeouts.\n"
         )
+        h(
+            "Pedidos broadcast (Slave 0) não têm resposta por definição: não ficam pendentes, "
+            "nunca contam como timeout e não entram no cálculo da Timeout rate.\n"
+        )
 
         h("Como interpretar a tabela Tráfego\n", "heading")
         h("• REQUEST — pedido Modbus RTU reconhecido pelo parser.\n", "bullet")
         h("• RESPONSE — resposta Modbus RTU reconhecida que não é uma EXCEPTION.\n", "bullet")
+        h(
+            "• FC05/FC06/FC08/FC22 — o pedido e a resposta têm o mesmo formato. A trama é "
+            "RESPONSE quando existe um pedido pendente do mesmo Slave/FC (em FC05/06/22 os "
+            "bytes têm de ser iguais; em RS232 dual RX tem de vir do canal oposto). Caso "
+            "contrário é REQUEST.\n",
+            "bullet"
+        )
+        h(
+            "• Respostas FC01/FC02 mostram os bits por ordem de endereço, agrupados por byte. "
+            "No Frame Inspector, as respostas de leitura emparelhadas (FC01–FC04) mostram o "
+            "PDU Address de cada valor.\n",
+            "bullet"
+        )
         h(
             "• EXCEPTION — resposta Modbus com Function Code de exceção (bit 7 ativo). "
             "Detalhes mostra o código e a descrição normalizada.\n",
@@ -2243,6 +2269,12 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "FC04 fallback é opcional e aumenta o número máximo de tentativas. O timeout "
             "mínimo é adaptado ao baud rate. Um write timeout significa falha ao transmitir "
             "pela porta/driver e não deve ser interpretado simplesmente como “slave sem resposta”.\n"
+        )
+        h(
+            "Tentativas (1 a 3) repete cada pedido sem resposta antes de passar ao Slave "
+            "seguinte. Antes da primeira transmissão, a pesquisa escuta o barramento durante "
+            f"{DISCOVERY_IDLE_CHECK_SECONDS:g} s; se receber qualquer byte, não transmite e "
+            "indica que pode existir outro master ativo.\n"
         )
         h(
             "Device Identification (FC43/14) é opcional. Quando ativo, só é enviado depois "

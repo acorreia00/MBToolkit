@@ -2,7 +2,7 @@
 """Diagnostic helpers for MBSniffer traffic inspection and anomaly display."""
 
 from mb_config import MODBUS_EXCEPTION_CODES, SLOW_RESPONSE_THRESHOLD_MS
-from mb_protocol import crc16_modbus
+from mb_protocol import crc16_modbus, read_bits_from_response
 from mb_i18n import LANGUAGE_PORTUGUESE, translate_details, translate_text
 
 
@@ -85,12 +85,33 @@ def response_payload(record, language=LANGUAGE_PORTUGUESE):
         data = frame[3:3 + byte_count]
         data_hex = " ".join(f"{b:02X}" for b in data)
         decoded = ""
+        start = record.get("request_pdu_address")
         if fc in (3, 4) and byte_count % 2 == 0 and len(data) == byte_count:
             regs = [
                 (data[i] << 8) | data[i + 1]
                 for i in range(0, len(data), 2)
             ]
-            decoded = translate_details(f"Registos={regs}", language)
+            if start is not None:
+                # The matched request gives the address of every value.
+                pairs = ", ".join(
+                    f"{start + i}={value}" for i, value in enumerate(regs)
+                )
+                decoded = translate_details(
+                    f"Registos (PDU Address=valor): {pairs}", language
+                )
+            else:
+                decoded = translate_details(f"Registos={regs}", language)
+        elif fc in (1, 2) and len(data) == byte_count:
+            bits = read_bits_from_response(frame, record.get("request_qty"))
+            if start is not None:
+                pairs = ", ".join(
+                    f"{start + i}={value}" for i, value in enumerate(bits)
+                )
+                decoded = translate_details(
+                    f"Bits (PDU Address=valor): {pairs}", language
+                )
+            else:
+                decoded = "Bits=" + "".join(str(bit) for bit in bits)
         return byte_count, data_hex, decoded
 
     if kind == "REQUEST" and fc in (15, 16) and len(frame) >= 9:

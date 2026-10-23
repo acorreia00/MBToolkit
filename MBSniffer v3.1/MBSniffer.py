@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# MBSniffer v3.0
+# MBSniffer v3.1
 """MBSniffer launcher."""
 
 # Simulação:

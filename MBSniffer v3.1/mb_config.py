@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "MBSniffer"
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 
 # Simulação:
 #   0 = simulação inativa (o botão não aparece no GUI)
@@ -19,7 +19,9 @@ debug_sim = 0
 DISCOVERY_BAUD_RATES = (1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200)
 DISCOVERY_PARITIES = ("None", "Even", "Odd")
 DISCOVERY_STOP_BITS = ("1", "2")
-DISCOVERY_DEFAULT_MIN_TIMEOUT_MS = 40
+DISCOVERY_DEFAULT_MIN_TIMEOUT_MS = 100
+# v3.0 default; settings saved by v3.0 with this value migrate to the new default.
+DISCOVERY_LEGACY_DEFAULT_MIN_TIMEOUT_MS = 40
 DISCOVERY_MIN_TIMEOUT_MS = 10
 DISCOVERY_MAX_TIMEOUT_MS = 2000
 DISCOVERY_PROBE_ADDRESS = 0
@@ -27,6 +29,12 @@ DISCOVERY_PROBE_QTY = 1
 DISCOVERY_WRITE_TIMEOUT_SECONDS = 1.5
 DISCOVERY_WRITE_RETRIES = 1
 DISCOVERY_RX_BUFFER_LIMIT = 1024
+# Total probe attempts per FC when a Slave does not answer.
+DISCOVERY_MIN_ATTEMPTS = 1
+DISCOVERY_MAX_ATTEMPTS = 3
+DISCOVERY_DEFAULT_ATTEMPTS = 1
+# Passive listen before the first transmission; any byte aborts the scan.
+DISCOVERY_IDLE_CHECK_SECONDS = 1.0
 
 # GUI queue processing limits.
 UI_QUEUE_BATCH_SIZE = 200
@@ -38,6 +46,11 @@ MIN_PENDING_REQUEST_TIMEOUT_SECONDS = 1.0
 DEFAULT_PENDING_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_REQUEST_TIMEOUT_SECONDS = 300.0
 PENDING_REQUEST_TIMEOUT_SECONDS = DEFAULT_PENDING_REQUEST_TIMEOUT_SECONDS
+
+# Sniffer burst assembly: extra wait when a burst ends with the start of a
+# recognised frame. USB-serial adapters deliver bytes in latency-timer
+# chunks (FTDI default 16 ms), which can split one RTU frame in two.
+SNIFFER_SPLIT_FRAME_HOLD_MS = 40.0
 
 # Diagnostic thresholds.
 SLOW_RESPONSE_THRESHOLD_MS = 500.0
@@ -294,6 +307,20 @@ def load_ui_settings() -> dict:
         else:
             stop_bits = ["1"]
 
+        min_timeout_ms = _validated_int_string(
+            finder_in.get("min_timeout_ms"),
+            DISCOVERY_MIN_TIMEOUT_MS,
+            DISCOVERY_MAX_TIMEOUT_MS,
+            DISCOVERY_DEFAULT_MIN_TIMEOUT_MS,
+        )
+        # Settings written before v3.1 have no "attempts" key. Their 40 ms
+        # value is the old automatic default, not a user choice.
+        if (
+            "attempts" not in finder_in
+            and min_timeout_ms == str(DISCOVERY_LEGACY_DEFAULT_MIN_TIMEOUT_MS)
+        ):
+            min_timeout_ms = str(DISCOVERY_DEFAULT_MIN_TIMEOUT_MS)
+
         result["bus_slave_finder"] = {
             "baud_rates": baud_rates,
             "parities": parities,
@@ -310,11 +337,12 @@ def load_ui_settings() -> dict:
                 247,
                 247,
             ),
-            "min_timeout_ms": _validated_int_string(
-                finder_in.get("min_timeout_ms"),
-                DISCOVERY_MIN_TIMEOUT_MS,
-                DISCOVERY_MAX_TIMEOUT_MS,
-                DISCOVERY_DEFAULT_MIN_TIMEOUT_MS,
+            "min_timeout_ms": min_timeout_ms,
+            "attempts": _validated_int_string(
+                finder_in.get("attempts"),
+                DISCOVERY_MIN_ATTEMPTS,
+                DISCOVERY_MAX_ATTEMPTS,
+                DISCOVERY_DEFAULT_ATTEMPTS,
             ),
             "fc04_fallback": _validated_bool(
                 finder_in.get("fc04_fallback"),
@@ -362,7 +390,7 @@ def get_application_directory() -> Path:
 
     - PyInstaller EXE: directory containing MBSniffer.exe.
     - Packaged Python/BAT mode: directory containing the root MBSniffer.bat.
-      The Python sources live inside the versioned child folder, e.g. ``MBSniffer v3.0``.
+      The Python sources live inside the versioned child folder, e.g. ``MBSniffer v3.1``.
     - Development Python mode: directory containing this module.
     """
     try:
