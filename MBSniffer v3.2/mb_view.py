@@ -29,6 +29,10 @@ from mb_diagnostics import (
 from mb_i18n import canonical_ui_text, translate_details
 from mb_protocol import read_bits_details
 
+# Index of "Abrir no Master" in the Traffic context menu (built in mb_gui.py).
+TRAFFIC_MENU_OPEN_IN_MASTER = 8
+
+
 class ViewMixin:
     """Methods for rendering, filtering, statistics and logging."""
 
@@ -516,6 +520,11 @@ class ViewMixin:
         self._transaction_filter_seqs = None
         self.render_filtered_view()
 
+    def context_open_selected_in_master(self):
+        record = self.selected_record()
+        if record is not None:
+            self.master_open_from_record(record)
+
     def show_traffic_context_menu(self, event):
         row_iid = self.tree.identify_row(event.y)
         if not row_iid or row_iid not in self._record_by_iid:
@@ -524,6 +533,15 @@ class ViewMixin:
         self.tree.selection_set(row_iid)
         self.tree.focus(row_iid)
         self.on_row_select()
+
+        opener = getattr(self, "master_definition_from_record", None)
+        if callable(opener):
+            state = "normal" if opener(self._record_by_iid[row_iid]) else "disabled"
+            try:
+                self.traffic_context_menu.entryconfigure(TRAFFIC_MENU_OPEN_IN_MASTER,
+                                                         state=state)
+            except tk.TclError:
+                pass
 
         try:
             self.traffic_context_menu.tk_popup(event.x_root, event.y_root)

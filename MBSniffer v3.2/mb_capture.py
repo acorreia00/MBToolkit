@@ -825,6 +825,12 @@ class CaptureMixin:
         if self._closing:
             return
 
+        # A changed Master workspace may be saved first; "Cancel" keeps the
+        # application open.
+        confirm = getattr(self, "master_confirm_close", None)
+        if callable(confirm) and not confirm():
+            return
+
         try:
             saver = getattr(self, "save_current_ui_settings", None)
             if callable(saver):

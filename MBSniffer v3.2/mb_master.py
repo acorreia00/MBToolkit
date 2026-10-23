@@ -16,6 +16,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from mb_config import (
+    MASTER_RECONNECT_INTERVAL_SECONDS,
     MASTER_MAX_READ_BITS,
     MASTER_MAX_READ_REGISTERS,
     MASTER_MAX_WRITE_BITS,
@@ -38,10 +39,14 @@ WRITABLE_READ_FCS = {1: (5, 15), 3: (6, 16)}  # read window FC -> write FCs
 # ---------------------------------------------------------------------------
 
 BYTE_ORDERS = ("ABCD", "CDAB", "BADC", "DCBA")
+# 64-bit orders, in the same sequence: big-endian, word swap (registers in
+# reverse order), byte swap inside each register, little-endian.
+BYTE_ORDERS_64 = ("ABCDEFGH", "GHEFCDAB", "BADCFEHG", "HGFEDCBA")
+WIRE_LETTERS = "ABCDEFGH"
 
 # (key, label, registers per value).  Labels are technical terms and are not
-# translated.  Byte order letters follow the wire order of two registers:
-# register n = A B, register n+1 = C D; "ABCD" is big-endian.
+# translated.  Byte order letters follow the wire order of the registers:
+# register n = A B, register n+1 = C D, ...; "ABCD" / "ABCDEFGH" is big-endian.
 REGISTER_FORMATS = (
     ("int16", "Signed 16-bit", 1),
     ("uint16", "Unsigned 16-bit", 1),
@@ -55,68 +60,194 @@ REGISTER_FORMATS = (
         ("float32", "Float 32-bit"),
     )
     for order in BYTE_ORDERS
+) + tuple(
+    (f"{kind}_{order}", f"{label} {order}", 4)
+    for kind, label in (
+        ("int64", "Signed 64-bit"),
+        ("uint64", "Unsigned 64-bit"),
+        ("float64", "Double 64-bit"),
+    )
+    for order in BYTE_ORDERS_64
 )
 FORMAT_LABELS = {key: label for key, label, _size in REGISTER_FORMATS}
 FORMAT_KEYS_BY_LABEL = {label: key for key, label, _size in REGISTER_FORMATS}
 FORMAT_SIZES = {key: size for key, _label, size in REGISTER_FORMATS}
 DEFAULT_FORMAT = "int16"
 
+_STRUCT_CODES = {"int32": ">i", "uint32": ">I", "float32": ">f",
+                 "int64": ">q", "uint64": ">Q", "float64": ">d"}
 
-def _value_bytes_from_registers(high, low, order):
-    wire = (high >> 8 & 0xFF, high & 0xFF, low >> 8 & 0xFF, low & 0xFF)
-    return bytes(wire["ABCD".index(letter)] for letter in order)
+
+def _value_bytes(registers, order):
+    """Reorder the wire bytes of 2 or 4 registers into big-endian value bytes."""
+    wire = b"".join(bytes(((r >> 8) & 0xFF, r & 0xFF)) for r in registers)
+    return bytes(wire[WIRE_LETTERS.index(letter)] for letter in order)
 
 
 def _registers_from_value_bytes(value, order):
-    wire = [0, 0, 0, 0]
+    wire = bytearray(len(order))
     for index, letter in enumerate(order):
-        wire["ABCD".index(letter)] = value[index]
-    return [(wire[0] << 8) | wire[1], (wire[2] << 8) | wire[3]]
+        wire[WIRE_LETTERS.index(letter)] = value[index]
+    return [(wire[i] << 8) | wire[i + 1] for i in range(0, len(wire), 2)]
 
 
-def format_float(value):
+def format_float(value, digits=7):
     if math.isnan(value):
         return "NaN"
     if math.isinf(value):
         return "-Inf" if value < 0 else "Inf"
-    return f"{value:.7g}"
+    return f"{value:.{digits}g}"
+
+
+def decode_value(registers, fmt):
+    """Numeric value of one value (None for the Hex/Binary display formats)."""
+    if fmt in ("hex16", "bin16"):
+        return None
+    if FORMAT_SIZES[fmt] == 1:
+        value = registers[0] & 0xFFFF
+        return value - 0x10000 if fmt == "int16" and value & 0x8000 else value
+    kind, order = fmt.split("_")
+    return struct.unpack(_STRUCT_CODES[kind], _value_bytes(registers, order))[0]
+
+
+SCALE_MAX_DECIMALS = 6
+SCALE_MAX_UNIT_LENGTH = 12
+
+
+def validate_scale(raw_min, raw_max, eng_min, eng_max, decimals=1, unit=""):
+    """Return a scale dict from user text/numbers; raise ValueError (PT text)."""
+    try:
+        values = [float(str(v).strip().replace(",", ".")) for v in
+                  (raw_min, raw_max, eng_min, eng_max)]
+        decimals = int(str(decimals).strip())
+    except ValueError:
+        raise ValueError("A escala tem de ter números válidos.") from None
+    if any(math.isnan(v) or math.isinf(v) for v in values):
+        raise ValueError("A escala tem de ter números válidos.")
+    if values[0] == values[1]:
+        raise ValueError("O bruto mínimo e o bruto máximo têm de ser diferentes.")
+    if not 0 <= decimals <= SCALE_MAX_DECIMALS:
+        raise ValueError("As casas decimais têm de estar entre 0 e 6.")
+    unit = str(unit or "").strip()[:SCALE_MAX_UNIT_LENGTH]
+    return {"raw": [values[0], values[1]], "eng": [values[2], values[3]],
+            "decimals": decimals, "unit": unit}
+
+
+def scale_value(number, scale):
+    """Linear map from raw units to engineering units through two points."""
+    (r1, r2), (e1, e2) = scale["raw"], scale["eng"]
+    return e1 + (number - r1) * (e2 - e1) / (r2 - r1)
+
+
+def unscale_value(value, scale):
+    """Inverse of scale_value(): engineering units back to raw units."""
+    (r1, r2), (e1, e2) = scale["raw"], scale["eng"]
+    if e1 == e2:
+        raise ValueError("Esta escala não permite escrever: os valores de engenharia são iguais.")
+    return r1 + (value - e1) * (r2 - r1) / (e2 - e1)
+
+
+def format_scaled(number, scale):
+    text = f"{scale_value(number, scale):.{scale['decimals']}f}"
+    return f"{text} {scale['unit']}" if scale.get("unit") else text
+
+
+def format_value(registers, fmt):
+    """Display text of one value occupying ``FORMAT_SIZES[fmt]`` registers."""
+    if FORMAT_SIZES[fmt] == 1:
+        value = registers[0] & 0xFFFF
+        if fmt == "int16":
+            return str(value - 0x10000 if value & 0x8000 else value)
+        if fmt == "uint16":
+            return str(value)
+        if fmt == "hex16":
+            return f"0x{value:04X}"
+        return f"{value >> 8:08b} {value & 0xFF:08b}"
+
+    kind, order = fmt.split("_")
+    number = struct.unpack(_STRUCT_CODES[kind], _value_bytes(registers, order))[0]
+    if kind == "float32":
+        return format_float(number, 7)
+    if kind == "float64":
+        return format_float(number, 15)
+    return str(number)
+
+
+def register_groups(qty, start_address=0, default_fmt=DEFAULT_FORMAT, overrides=None):
+    """Split a window's registers into values: [(offset, size, fmt or None)].
+
+    *overrides* maps a PDU address to the format of the value starting there
+    (per-address formats). Other registers use *default_fmt*. A value that
+    would run past the window, or a default multi-register value cut by an
+    override, becomes ``(offset, size, None)`` and is shown as "—".
+    """
+    overrides = overrides or {}
+    default_fmt = default_fmt if default_fmt in FORMAT_SIZES else DEFAULT_FORMAT
+    groups = []
+    offset = 0
+    while offset < qty:
+        fmt = overrides.get(start_address + offset)
+        if fmt not in FORMAT_SIZES:
+            fmt = default_fmt
+            size = FORMAT_SIZES[fmt]
+            cut = next((j for j in range(offset + 1, min(offset + size, qty))
+                        if start_address + j in overrides), None)
+            if cut is not None:
+                groups.append((offset, cut - offset, None))
+                offset = cut
+                continue
+        size = FORMAT_SIZES[fmt]
+        if offset + size > qty:
+            groups.append((offset, qty - offset, None))
+            break
+        groups.append((offset, size, fmt))
+        offset += size
+    return groups
+
+
+def format_window_values(registers, start_address=0, default_fmt=DEFAULT_FORMAT,
+                         overrides=None, scales=None):
+    """Return one display string per register, honouring per-address formats.
+
+    A multi-register value is shown on the row of its first register; the
+    other rows of the group are empty. Incomplete groups show "—". *scales*
+    maps the PDU address where a value starts to a scale (validate_scale());
+    scaled values are shown in engineering units (Hex/Binary stay raw).
+    """
+    scales = scales or {}
+    out = []
+    for offset, size, fmt in register_groups(len(registers), start_address,
+                                             default_fmt, overrides):
+        if fmt is None:
+            out.extend(["—"] + [""] * (size - 1))
+            continue
+        group = registers[offset:offset + size]
+        scale = scales.get(start_address + offset)
+        number = decode_value(group, fmt) if scale else None
+        if scale and number is not None and not (isinstance(number, float)
+                                                  and (math.isnan(number) or math.isinf(number))):
+            out.append(format_scaled(number, scale))
+        else:
+            out.append(format_value(group, fmt))
+        out.extend([""] * (size - 1))
+    return out
+
+
+def raw_text_for_scaled(value_text, scale, fmt):
+    """Convert an engineering value typed by the user into raw text for *fmt*."""
+    try:
+        value = float(str(value_text).strip().replace(",", "."))
+    except ValueError:
+        raise ValueError("Valor fora do formato selecionado.") from None
+    raw = unscale_value(value, scale)
+    if fmt.split("_")[0].startswith("float"):
+        return repr(raw)
+    return str(int(round(raw)))
 
 
 def format_register_values(registers, fmt):
-    """Return one display string per register.
-
-    32-bit formats show the value on the first register of each pair and an
-    empty cell on the second; an unpaired final register shows "—".
-    """
-    fmt = fmt if fmt in FORMAT_SIZES else DEFAULT_FORMAT
-    out = []
-    if FORMAT_SIZES[fmt] == 1:
-        for value in registers:
-            value &= 0xFFFF
-            if fmt == "int16":
-                out.append(str(value - 0x10000 if value & 0x8000 else value))
-            elif fmt == "uint16":
-                out.append(str(value))
-            elif fmt == "hex16":
-                out.append(f"0x{value:04X}")
-            else:
-                out.append(f"{value >> 8:08b} {value & 0xFF:08b}")
-        return out
-
-    kind, order = fmt.split("_")
-    for index in range(0, len(registers), 2):
-        if index + 1 >= len(registers):
-            out.append("—")
-            break
-        raw = _value_bytes_from_registers(registers[index], registers[index + 1], order)
-        if kind == "int32":
-            text = str(struct.unpack(">i", raw)[0])
-        elif kind == "uint32":
-            text = str(struct.unpack(">I", raw)[0])
-        else:
-            text = format_float(struct.unpack(">f", raw)[0])
-        out.extend((text, ""))
-    return out
+    """Display strings for registers that all use one format."""
+    return format_window_values(registers, 0, fmt, None)
 
 
 def _parse_int(text):
@@ -163,15 +294,14 @@ def encode_register_value(text, fmt):
             return [value]
 
         kind, order = fmt.split("_")
-        if kind == "float32":
+        code = _STRUCT_CODES[kind]
+        if kind.startswith("float"):
             number = float(text.replace(",", "."))
-            raw = struct.pack(">f", number)
-            if math.isinf(struct.unpack(">f", raw)[0]) and not math.isinf(number):
+            raw = struct.pack(code, number)
+            if math.isinf(struct.unpack(code, raw)[0]) and not math.isinf(number):
                 raise ValueError
-        elif kind == "int32":
-            raw = struct.pack(">i", _parse_int(text))
         else:
-            raw = struct.pack(">I", _parse_int(text))
+            raw = struct.pack(code, _parse_int(text))
         return _registers_from_value_bytes(raw, order)
     except (ValueError, OverflowError, struct.error):
         raise ValueError("Valor fora do formato selecionado.") from None
@@ -343,12 +473,20 @@ class MasterEngine:
     ``scan_ms`` after its previous transaction started (0 = continuously).
     After every transaction the bus is left silent for at least the
     configured delay between polls, and never less than Modbus t3.5.
+
+    With *reopen* (a callable returning a new open serial object), a serial or
+    driver failure does not end the session: the engine closes the port, posts
+    ``master_reconnecting`` and retries every MASTER_RECONNECT_INTERVAL_SECONDS
+    until the port opens again (``master_reconnected``) or the engine stops.
     """
 
     def __init__(self, ser, event_queue, *, baud, parity, stopbits,
                  response_timeout_ms, delay_ms, serial_module=None,
-                 idle_check_seconds=0.0):
+                 idle_check_seconds=0.0, reopen=None,
+                 reconnect_interval_s=MASTER_RECONNECT_INTERVAL_SECONDS):
         self.ser = ser
+        self.reopen = reopen
+        self.reconnect_interval_s = float(reconnect_interval_s)
         self.event_queue = event_queue
         self.baud = int(baud)
         self.parity = parity
@@ -443,31 +581,63 @@ class MasterEngine:
             self.event_queue.put(("master_ready", None))
 
             while not self.stop_event.is_set():
-                job = self.next_job()
-                if job[0] == "wait":
-                    self._wake.wait(job[1])
-                    self._wake.clear()
-                    continue
-
-                if job[0] == "write":
-                    window_id, request, description = job[1]
-                    result = self.transact(request)
-                    result.update(kind="write", window_id=window_id, description=description)
-                else:
-                    definition, once = job[1], job[2]
-                    result = self.transact(definition.request())
-                    result.update(kind="read", window_id=definition.window_id, once=once,
-                                  fc=definition.fc, address=definition.address)
-                if self.stop_event.is_set():
-                    break
-                self.event_queue.put(("master_result", result))
-                if self.stop_event.wait(self.delay_s):
-                    break
-        except Exception as exc:  # serial/driver failure ends the session
+                try:
+                    self._serve_jobs()
+                except Exception as exc:  # serial/driver failure
+                    if self.stop_event.is_set():
+                        break
+                    detail = f"{type(exc).__name__}: {exc}"
+                    if self.reopen is None:
+                        error = ("serial", detail, 0)
+                        break
+                    if not self._reconnect(detail):
+                        break
+        except Exception as exc:  # failure during the idle check
             if not self.stop_event.is_set():
                 error = ("serial", f"{type(exc).__name__}: {exc}", 0)
         finally:
             self.event_queue.put(("master_stopped", {"error": error}))
+
+    def _serve_jobs(self):
+        """Serve writes / reads until stopped; serial errors propagate."""
+        while not self.stop_event.is_set():
+            job = self.next_job()
+            if job[0] == "wait":
+                self._wake.wait(job[1])
+                self._wake.clear()
+                continue
+
+            if job[0] == "write":
+                window_id, request, description = job[1]
+                result = self.transact(request)
+                result.update(kind="write", window_id=window_id, description=description)
+            else:
+                definition, once = job[1], job[2]
+                result = self.transact(definition.request())
+                result.update(kind="read", window_id=definition.window_id, once=once,
+                              fc=definition.fc, address=definition.address)
+            if self.stop_event.is_set():
+                return
+            self.event_queue.put(("master_result", result))
+            if self.stop_event.wait(self.delay_s):
+                return
+
+    def _reconnect(self, detail):
+        """Close the failed port and reopen it; False when stopped meanwhile."""
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+        self.event_queue.put(("master_reconnecting", {"error": detail}))
+        while not self.stop_event.wait(self.reconnect_interval_s):
+            try:
+                ser = self.reopen()
+            except Exception:
+                continue
+            self.ser = ser
+            self.event_queue.put(("master_reconnected", None))
+            return True
+        return False
 
     def transact(self, request):
         """Send one request and wait for its response (no wait for broadcast)."""

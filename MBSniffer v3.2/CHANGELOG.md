@@ -2830,3 +2830,67 @@ Modbus Slave fica para mais tarde.
 - O ZIP leva: `MBSniffer.bat`, `README.txt`, `README.md`, `README.en.md`, o PDF,
   a pasta `MBSniffer vX.Y` (código, ícone, testes, `.bat`, notas, CHANGELOG) e
   `tools/`.
+
+## Janelas do Master e workspaces (versão mantém-se 3.2)
+
+- Cada janela tem cabeçalho com o nome, o resumo (Slave/FC/endereço/quantidade)
+  e os botões "Renomear", "Destacar" e "✕". O utilizador não encontrava o
+  "Fechar": estava no fim da fila de botões e ficava cortado com a escala do
+  Windows acima de 100%.
+- Janelas com nome próprio (`title`), guardado no workspace; vazio = "Janela N".
+- A grelha passa a calcular as colunas pela largura real das janelas.
+- Workspaces: menu "Workspace" com Guardar workspace…, Abrir workspace ▸ e
+  Apagar workspace ▸ (lista dos guardados) e Abrir pasta dos workspaces. Os
+  ficheiros ficam em `%APPDATA%\MBSniffer\Workspaces`, junto do `settings.json`.
+  Deixa de haver janelas de "Abrir/Guardar ficheiro".
+- Testes: 64 → 68 (pasta dos workspaces, lista ordenada, nomes válidos, nome da
+  janela no workspace).
+
+## Formatos por endereço, 64 bits e workspaces (versão mantém-se 3.2)
+
+Pedido do utilizador, registado em 9 pontos e aplicado de uma vez:
+
+1. Etiqueta do workspace: "(alterado)" quando há alterações por guardar; some
+   quando se fecham todas as janelas.
+2. Formato por endereço com clique direito e seleção múltipla (Ctrl/Shift).
+   32 bits exigem 2 registos seguidos; seleções maiores aplicam-se em pares.
+   "Repor formato da janela". Guardado no workspace (`formats`).
+3. Formatos de 64 bits: Signed, Unsigned e Double nas ordens ABCDEFGH,
+   GHEFCDAB, BADCFEHG e HGFEDCBA (4 registos; seleções maiores em grupos de 4;
+   escrita com FC16). `format_value()`, `register_groups()` e
+   `format_window_values()` em `mb_master.py`.
+4. Último workspace guardado em `settings.json` e reaberto ao arrancar (sem
+   ligar). Ao fechar com o workspace alterado: Guardar? Sim/Não/Cancelar; sem
+   workspace não pergunta.
+5. "Aplicar" destacado enquanto há campos por aplicar.
+6. Valores a cinzento quando a última leitura falha e ao desligar.
+7. Altura da tabela = quantidade (3 a 15 linhas).
+8. Copiar (menu e Ctrl+C) endereços, nomes e valores, separados por tabs.
+9. Base de endereços passa para o menu de clique direito.
+
+- A janela de escrita usa o formato do valor clicado.
+- Testes: 68 → 76.
+
+## Escala, Abrir no Master e religação automática (versão mantém-se 3.2)
+
+- Escala por endereço no clique direito ("Escala…", "Remover escala"): bruto →
+  unidades de engenharia por dois pontos, casas decimais e unidade; guardada no
+  workspace; a escrita aceita unidades e converte para bruto.
+- "Abrir no Master" no menu de contexto do Tráfego (pedido FC01–FC04 ou a sua
+  resposta) e nos resultados do Bus Slave Finder (clique direito / duplo
+  clique); copia os parâmetros série para o Master quando este está desligado.
+- O Master volta a abrir a porta sozinho (a cada 2 s) quando ela falha, por
+  exemplo com o adaptador USB desligado, e retoma as leituras.
+- Testes: 76 → 86.
+
+## Seleção por arrasto (versão mantém-se 3.2)
+
+- Nas tabelas do Master, carregar e arrastar seleciona todas as linhas entre a
+  linha inicial e a do rato, para cima ou para baixo, com scroll automático ao
+  sair da tabela. Ctrl+arrastar junta o bloco à seleção anterior. Clique,
+  Ctrl/Shift+clique e duplo clique ficam iguais.
+
+## Tabelas do Master com linhas alternadas e moldura (versão mantém-se 3.2)
+
+- Linhas alternadas com um fundo ligeiramente mais escuro e moldura de 1 px à
+  volta de cada tabela, nas cores da paleta clara/escura. Não ocupa espaço.

@@ -15,7 +15,7 @@
 - Filtros de tráfego, pesquisa, realce de anomalias e exportação para CSV;
 - Registo completo das capturas reais em TXT;
 - **Bus Slave Finder** para pesquisa ativa de Slave IDs, com tentativas configuráveis, Device Identification (FC43/14) opcional, aviso de segurança e verificação automática de barramento livre;
-- **Master** com várias janelas (uma por Slave ou zona de memória): leitura cíclica FC01–FC04, escrita FC05/06/15/16, formatos de 16 e 32 bits (incluindo float, nas 4 ordens de bytes), contadores e erros por janela, janelas destacáveis e workspace guardado em ficheiro;
+- **Master** com várias janelas (uma por Slave ou zona de memória): leitura cíclica FC01–FC04, escrita FC05/06/15/16, formatos de 16, 32 e 64 bits (incluindo float e double, nas 4 ordens de bytes) também por endereço, escala para unidades de engenharia, contadores e erros por janela, janelas com nome próprio e destacáveis, workspaces guardados num menu, "Abrir no Master" a partir do Sniffer e do Finder e religação automática da porta;
 - Interface em **Português** e **English**, selecionável em tempo real;
 - Modos claro e escuro com preferências persistentes.
 

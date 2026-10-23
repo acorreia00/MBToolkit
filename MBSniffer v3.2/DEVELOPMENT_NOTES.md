@@ -282,25 +282,81 @@ Regras:
   `open_discovery_serial_port()` do Finder (mesmas regras de escrita robusta).
 - Janelas: Slave 1–247, FC01–FC04, endereço 0–65535, quantidade até 2000 bits /
   125 registos, scan 0–3 600 000 ms, base 0/1, máx. 32 janelas. As alterações
-  só valem com "Aplicar"; mudar a zona de memória repõe os contadores.
+  só valem com "Aplicar" (fica com o estilo primário, azul, enquanto os campos
+  diferem do que está aplicado); mudar a zona de memória repõe os contadores.
+- A tabela tem altura = quantidade, entre 3 e 15 linhas, e seleção múltipla:
+  Ctrl/Shift+clique e arrastar com o rato (`_master_drag_*`; o ttk não tem
+  seleção por arrasto). Arrastar para fora faz scroll; Ctrl+arrastar junta à
+  seleção anterior.
+- Aspeto das tabelas: linhas alternadas (tag `odd`, `MASTER_STRIPE_LIGHT` /
+  `MASTER_STRIPE_DARK`) e moldura de 1 px (`tk.Frame` com `highlightthickness=1`
+  na cor `border` da paleta), recoloridas em `_master_configure_tree_tags()`.
+- Quando a última leitura falhou (ou ao desligar), as linhas ficam com a tag
+  `stale` (cor `disabled` da paleta) até chegar uma leitura correta.
 - Formatos (chaves em `mb_master.REGISTER_FORMATS`): `int16`, `uint16`, `hex16`,
-  `bin16` e `int32`/`uint32`/`float32` × ordens `ABCD`, `CDAB`, `BADC`, `DCBA`
-  (letras = bytes no fio: registo n = A B, registo n+1 = C D). Valores de 32
-  bits aparecem na linha do primeiro registo.
-- Escrita: só a partir de janelas FC01 (FC05/FC15) e FC03 (FC06/FC16); formatos
-  de 32 bits obrigam a FC16. Slave 0 = broadcast (não espera resposta). Uma
+  `bin16`; `int32`/`uint32`/`float32` × `ABCD`, `CDAB`, `BADC`, `DCBA`;
+  `int64`/`uint64`/`float64` × `ABCDEFGH`, `GHEFCDAB`, `BADCFEHG`, `HGFEDCBA`
+  (letras = bytes no fio: registo n = A B, n+1 = C D, …). Valores de 2 ou 4
+  registos aparecem na linha do primeiro.
+- Formato por endereço: `MasterWindow.formats` (PDU Address do início do valor
+  → formato); o resto usa `MasterWindow.fmt`. `register_groups()` divide a
+  janela em valores; um valor por defeito cortado por um formato próprio, ou
+  que passa do fim, mostra "—". `apply_format_to_rows()` aplica a seleção:
+  formatos de 2/4 registos exigem registos seguidos em múltiplos do tamanho e
+  apagam os formatos próprios que se sobreponham.
+- Menu de clique direito (por janela): Formato ▸ (16 bits, 32 bits ▸, 64 bits
+  ▸), Repor formato da janela, Copiar (Ctrl+C, texto separado por tabs) e Base
+  de endereços ▸ 0/1. A Base deixou de estar na linha de configuração; mudá-la
+  é imediato (não precisa de "Aplicar").
+- Escala por endereço: `MasterWindow.scales` (PDU Address do início do valor →
+  `validate_scale()`: dois pontos bruto/engenharia, casas decimais 0–6 e
+  unidade). `format_window_values(..., scales)` mostra o valor escalado; Hex e
+  Binary ficam em bruto. Na escrita, o valor é escrito em unidades e
+  `raw_text_for_scaled()` converte para bruto (arredondado nos inteiros).
+- "Abrir no Master": `master_definition_from_record()` tira Slave/FC/endereço/
+  quantidade de um REQUEST ou da resposta emparelhada (só FC01–FC04);
+  `master_open_definition()` cria a janela, mostra o separador Master e copia
+  porta/baud/parity/stop para a ligação só se o Master não estiver ligado.
+  Entradas: menu de contexto do Tráfego (índice `TRAFFIC_MENU_OPEN_IN_MASTER`
+  em `mb_view.py`) e clique direito / duplo clique nos resultados do Finder.
+- Religar: o `MasterEngine` recebe `reopen` (abre a mesma porta com os mesmos
+  parâmetros). Uma falha da porta durante a sessão fecha-a, envia
+  `master_reconnecting` e tenta reabrir a cada
+  `MASTER_RECONNECT_INTERVAL_SECONDS` (2 s) até conseguir
+  (`master_reconnected`) ou até "Desligar". Não repete a verificação de
+  barramento livre.
+- Escrita: só a partir de janelas FC01 (FC05/FC15) e FC03 (FC06/FC16), com o
+  formato do valor clicado; formatos de 32/64 bits obrigam a FC16. Slave 0 = broadcast (não espera resposta). Uma
   escrita aceite pede logo "Ler 1x" da janela.
 - Eco do adaptador RS485: ignorado nas leituras; em FC05/06 a resposta é um eco
   exato, por isso um eco do adaptador não se distingue da resposta do slave.
 - Resultados chegam ao Tk como eventos `master_ready`, `master_result`,
   `master_stopped`; respostas de uma definição entretanto alterada são
   ignoradas.
+- Cabeçalho de cada janela: nome (`MasterWindow.title`, vazio = "Janela N";
+  duplo clique ou "Renomear" para mudar), resumo Slave/FC/endereço/quantidade e
+  botões "Renomear", "Destacar"/"Ancorar" e "✕" (fechar). O fecho fica no
+  cabeçalho para nunca depender da largura da janela (escala do Windows).
+- A grelha calcula as colunas a partir da largura pedida pelas janelas (cresce
+  com a escala do Windows), nunca abaixo de 600 px por coluna.
 - Destacar: a janela é reconstruída num `Toplevel`; fechar esse Toplevel volta
   a ancorá-la. O estado vive em `MasterWindow`, não nos widgets.
 - Widgets criados depois do arranque recebem a etiqueta do guarda da roda do
   rato (`_master_install_wheel_tags`): a roda percorre a grelha de janelas e
   nunca altera Comboboxes/Spinboxes.
-- Workspace `.mbsw` (JSON, `format = "MBSniffer Master workspace"`, versão 1):
-  ligação (incluindo a porta, por ser um ficheiro escolhido pelo utilizador) e
-  janelas com formatos e nomes. Entradas inválidas são ignoradas com aviso.
-- `settings.json` guarda só os parâmetros de ligação do Master (sem a porta).
+- Workspaces: menu "Workspace" (Guardar workspace…, Abrir workspace ▸, Apagar
+  workspace ▸, Abrir pasta dos workspaces). Cada workspace é um ficheiro
+  `<nome>.mbsw` em `%APPDATA%\MBSniffer\Workspaces` (`get_workspaces_folder()`,
+  ao lado do `settings.json`). Os nomes são validados como nomes de ficheiro do
+  Windows. O menu é reconstruído sempre que se abre.
+- Formato `.mbsw` (JSON, `format = "MBSniffer Master workspace"`, versão 1):
+  ligação (incluindo a porta) e janelas com nome, formatos e nomes dos
+  endereços. Entradas inválidas são ignoradas com aviso.
+- Alterações ao workspace aberto (janelas, nomes, formatos, base, pausa,
+  "Aplicar") marcam-no como "(alterado)" (`master_workspace_dirty`); abrir ou
+  guardar limpa a marca. Fechar todas as janelas deixa de ter workspace aberto.
+- `settings.json` guarda os parâmetros de ligação do Master (sem a porta) e
+  `master.last_workspace`, reaberto ao arrancar (sem ligar ao barramento).
+- Ao fechar o programa (`master_confirm_close()`, chamado no início de
+  `on_close`): só com um workspace guardado e alterado pergunta
+  Sim/Não/Cancelar; janelas sem workspace fecham sem perguntar.

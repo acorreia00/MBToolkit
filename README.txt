@@ -11,12 +11,21 @@ NOVIDADES v3.2
 --------------
 - Novo separador Master: várias janelas, uma por Slave ou zona de memória.
 - Cada janela: Slave ID, função FC01–FC04, endereço, quantidade, scan rate,
-  base 0/1 e formato; botões Aplicar, Pausar, Ler 1x, Duplicar, Destacar e Fechar.
-- Formatos 16 bits (com/sem sinal, hex, binário) e 32 bits (com/sem sinal e
-  float) nas ordens ABCD, CDAB, BADC e DCBA.
+  base 0/1 e formato; botões Aplicar, Pausar, Ler 1x e Duplicar; no cabeçalho,
+  Renomear, Destacar e ✕ (fechar).
+- Formatos 16 bits (com/sem sinal, hex, binário), 32 bits (com/sem sinal e
+  float) e 64 bits (com/sem sinal e double), nas 4 ordens de bytes; formato
+  próprio por endereço com clique direito.
+- O último workspace reabre ao arrancar; ao fechar com alterações por guardar,
+  pergunta se quer guardar.
+- Escala por endereço (bruto → unidades de engenharia, com unidade).
+- "Abrir no Master" a partir do Tráfego do Sniffer e do Bus Slave Finder.
+- Se o adaptador USB for desligado, o Master volta a ligar sozinho quando ele
+  regressa.
 - Escrita por duplo clique (FC05/06/15/16), incluindo broadcast (Slave 0).
 - Contadores Tx/Err/Timeouts, tempo de resposta e último erro por janela.
-- Workspace (.mbsw) guarda a ligação, as janelas, os formatos e os nomes.
+- Menu Workspace: guarda a ligação, as janelas, os formatos e os nomes com um
+  nome à escolha e lista os workspaces guardados para abrir ou apagar.
 - O ZIP passa a incluir o histórico git, a pasta tools e o PDF técnico.
 
 BASE FUNCIONAL DA v3.1
@@ -227,8 +236,39 @@ Duplo clique num valor (janelas FC01/FC03) abre a escrita; duplo clique num
 nome permite dar um nome ao endereço. Vários valores separados por ";" são
 escritos em endereços seguidos com FC15/FC16.
 
-"Destacar" abre a janela fora do separador; "Ancorar" devolve-a.
-"Guardar workspace" / "Abrir workspace" gravam e repõem tudo num ficheiro .mbsw.
+O "Formato" da janela é o formato por defeito. Clique direito num ou mais
+endereços (arrastar com o rato, ou Ctrl/Shift, para selecionar vários):
+- Formato: só desses endereços. 32 bits exigem 2 registos seguidos e 64 bits 4
+  (ou um múltiplo, aplicado em grupos).
+- Repor formato da janela.
+- Escala…: converte o valor bruto em unidades (Bruto mín./máx. → Eng.
+  mín./máx., casas decimais e unidade). Escreve-se em unidades. "Remover
+  escala" volta ao valor bruto.
+- Copiar (também Ctrl+C): endereços, nomes e valores para colar no Excel.
+- Base de endereços: 0 = PDU Address; 1 = numeração a partir de 1, como em
+  muitos manuais.
+
+"Aplicar" fica azul enquanto houver campos alterados por aplicar. Quando uma
+leitura falha, os valores ficam a cinzento até voltar a haver uma leitura boa.
+
+No cabeçalho de cada janela: "Renomear" dá-lhe um nome (também com duplo
+clique no nome), "Destacar" abre-a fora do separador ("Ancorar" devolve-a)
+e "✕" fecha-a.
+
+Menu "Workspace": "Guardar workspace…" grava tudo com um nome; "Abrir
+workspace" e "Apagar workspace" mostram a lista dos workspaces guardados.
+Ficam em %APPDATA%\MBSniffer\Workspaces, junto das preferências.
+O último workspace reabre ao arrancar (sem ligar). Com alterações por guardar
+aparece "(alterado)" e, ao fechar o programa, a pergunta "Guardar alterações?".
+Janelas sem workspace fecham sem perguntar.
+
+"Abrir no Master": clique direito num pedido de leitura (ou na resposta) no
+Tráfego do Sniffer, ou clique direito / duplo clique num Slave encontrado pelo
+Bus Slave Finder. Cria a janela com o mesmo Slave, função, endereço e
+quantidade e copia os parâmetros série para o Master.
+
+Se a porta COM falhar durante a ligação (adaptador USB desligado), o Master
+tenta reabri-la a cada 2 s e retoma as leituras sozinho. "Desligar" para.
 
 BUS SLAVE FINDER / DEVICE IDENTIFICATION
 ----------------------------------------

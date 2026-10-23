@@ -907,9 +907,47 @@ class SlaveFinderMixin:
         self.discovery_tree.bind(
             "<Configure>", self.fit_discovery_columns_to_viewport, add="+"
         )
+        # Right-click / double-click a found Slave to read it in the Master tab.
+        self.discovery_context_menu = tk.Menu(self, tearoff=False)
+        self.discovery_context_menu.add_command(
+            label="Abrir no Master", command=self.discovery_open_selected_in_master
+        )
+        self.discovery_tree.bind("<Button-3>", self._show_discovery_context_menu)
+        self.discovery_tree.bind(
+            "<Double-1>", lambda _e: self.discovery_open_selected_in_master()
+        )
 
         self.update_discovery_estimate()
         self.update_discovery_start_state()
+
+    def _show_discovery_context_menu(self, event):
+        row = self.discovery_tree.identify_row(event.y)
+        if not row:
+            return
+        self.discovery_tree.selection_set(row)
+        try:
+            self.discovery_context_menu.entryconfigure(0, label=self.tr("Abrir no Master"))
+            self.discovery_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.discovery_context_menu.grab_release()
+
+    def discovery_open_selected_in_master(self):
+        """Open the selected found Slave in a new Master window."""
+        selection = self.discovery_tree.selection()
+        if not selection:
+            return
+        values = self.discovery_tree.item(selection[0], "values")
+        try:
+            slave, baud, config, fc = int(values[0]), str(values[1]), str(values[2]), int(values[3])
+        except (IndexError, ValueError):
+            return
+        parity = {"N": "None", "E": "Even", "O": "Odd"}.get(config[1:2], "None")
+        stopbits = config[2:] or "1"
+        self.master_open_definition(
+            {"slave": slave, "fc": fc, "address": 0, "qty": 10},
+            port=self.discovery_port_var.get().strip(),
+            baud=baud, parity=parity, stopbits=stopbits,
+        )
 
     def fit_discovery_columns_to_viewport(self, _event=None):
         """Fit Slave Finder columns to the visible Treeview width."""

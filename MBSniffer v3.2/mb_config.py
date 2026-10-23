@@ -62,6 +62,9 @@ MASTER_MAX_DELAY_MS = 10000
 MASTER_DEFAULT_SCAN_MS = 1000
 MASTER_MAX_SCAN_MS = 3600000
 MASTER_MAX_WINDOWS = 32
+# When the serial port fails (e.g. USB adapter unplugged), the Master keeps
+# trying to reopen it at this interval until it succeeds or is disconnected.
+MASTER_RECONNECT_INTERVAL_SECONDS = 2.0
 MASTER_WORKSPACE_FORMAT = "MBSniffer Master workspace"
 MASTER_WORKSPACE_VERSION = 1
 
@@ -398,6 +401,14 @@ def load_ui_settings() -> dict:
                 MASTER_MAX_DELAY_MS,
                 MASTER_DEFAULT_DELAY_MS,
             ),
+            # Workspace reopened at start-up (name of a file in Workspaces).
+            "last_workspace": (
+                master_in["last_workspace"].strip()
+                if isinstance(master_in.get("last_workspace"), str)
+                and 0 < len(master_in["last_workspace"].strip()) <= 60
+                and not any(ch in '<>:"/\\|?*' for ch in master_in["last_workspace"])
+                else ""
+            ),
         }
 
     return result
@@ -452,6 +463,17 @@ def get_application_directory() -> Path:
         return source_dir
     except Exception:
         return Path.cwd()
+
+def get_workspaces_folder() -> Path:
+    """
+    Return/create the Master workspace folder beside settings.json:
+
+        %APPDATA%\\MBSniffer\\Workspaces
+    """
+    folder = get_settings_file().parent / "Workspaces"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
 
 def get_logs_folder() -> Path:
     """

@@ -15,7 +15,7 @@
 - Traffic filters, search, anomaly highlighting and CSV export;
 - Complete TXT logging for real capture sessions;
 - **Bus Slave Finder** for active Slave ID discovery, with configurable retries, optional Device Identification (FC43/14), a safety warning and an automatic idle-bus check;
-- **Master** with several windows (one per Slave or data area): cyclic FC01–FC04 reads, FC05/06/15/16 writes, 16 and 32-bit formats (including float, in the 4 byte orders), per-window counters and errors, pop-out windows and a workspace saved to a file;
+- **Master** with several windows (one per Slave or data area): cyclic FC01–FC04 reads, FC05/06/15/16 writes, 16, 32 and 64-bit formats (including float and double, in the 4 byte orders), also per address, scaling to engineering units, per-window counters and errors, named pop-out windows workspaces saved in a menu, "Open in Master" from the Sniffer and the Finder and automatic port reconnection;
 - Runtime **Português / English** interface selection;
 - Light and Dark modes with persistent preferences.
 

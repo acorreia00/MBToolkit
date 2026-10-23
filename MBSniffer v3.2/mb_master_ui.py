@@ -7,9 +7,13 @@ sit in the tab's grid or be popped out into its own top-level window.
 """
 
 import json
+import os
+import subprocess
+import sys
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
+from tkinter import messagebox, ttk
 
 from mb_config import (
     DISCOVERY_BAUD_RATES,
@@ -26,6 +30,7 @@ from mb_config import (
     MASTER_WORKSPACE_FORMAT,
     MASTER_WORKSPACE_VERSION,
     MODBUS_EXCEPTION_CODES,
+    get_workspaces_folder,
 )
 from mb_diagnostics import FUNCTION_NAMES
 from mb_master import (
@@ -35,14 +40,18 @@ from mb_master import (
     FORMAT_LABELS,
     FORMAT_SIZES,
     READ_FUNCTION_CODES,
+    REGISTER_FORMATS,
     WRITABLE_READ_FCS,
     MasterEngine,
     PollDefinition,
     build_write_request,
     encode_coil_value,
     encode_register_value,
-    format_register_values,
+    format_window_values,
+    raw_text_for_scaled,
+    register_groups,
     validate_read_definition,
+    validate_scale,
 )
 from mb_theme import theme_colors
 from mb_widgets import RefreshButton
@@ -50,8 +59,18 @@ from mb_widgets import RefreshButton
 MASTER_PARITIES = ("None", "Even", "Odd")
 MASTER_STOP_BITS = ("1", "2")
 MASTER_PANE_MIN_WIDTH = 600
-MASTER_PANE_ROWS = 10
+MASTER_PANE_MIN_ROWS = 3
+MASTER_PANE_MAX_ROWS = 15
 MASTER_OK_MESSAGE_SECONDS = 3.0
+# Background of every second table row: one step from the table background.
+MASTER_STRIPE_LIGHT = "#f2f4f6"
+MASTER_STRIPE_DARK = "#262d34"
+MASTER_MAX_TITLE_LENGTH = 40
+WORKSPACE_SUFFIX = ".mbsw"
+# Characters Windows does not allow in file names.
+INVALID_FILENAME_CHARS = '<>:"/\\|?*'
+RESERVED_FILENAMES = ({"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)}
+                      | {f"LPT{i}" for i in range(1, 10)})
 WHEEL_GUARD_TAG = "MBSniffer.MouseWheelGuard"
 MASTER_WHEEL_TAG = "MBSniffer.MasterWheel"
 
@@ -73,14 +92,42 @@ def parse_int_field(text, minimum, maximum, message):
     return value
 
 
+def validate_workspace_name(name):
+    """Return a cleaned workspace name usable as a Windows file name."""
+    name = str(name or "").strip().rstrip(".")
+    if not name:
+        raise ValueError("O nome do workspace não pode ficar vazio.")
+    if len(name) > 60 or any(ch in INVALID_FILENAME_CHARS for ch in name) \
+            or any(ord(ch) < 32 for ch in name):
+        raise ValueError("O nome do workspace não pode ter os caracteres < > : \" / \\ | ? *.")
+    if name.split(".")[0].upper() in RESERVED_FILENAMES:
+        raise ValueError("Esse nome está reservado pelo Windows.")
+    return name
+
+
+def workspace_path(name):
+    return get_workspaces_folder() / f"{validate_workspace_name(name)}{WORKSPACE_SUFFIX}"
+
+
+def list_workspaces():
+    """Names of the saved workspaces, sorted alphabetically."""
+    try:
+        files = get_workspaces_folder().glob(f"*{WORKSPACE_SUFFIX}")
+        return sorted((f.stem for f in files if f.is_file()), key=str.casefold)
+    except OSError:
+        return []
+
+
 class MasterWindow:
     """State of one poll window (independent of where its pane is shown)."""
 
     def __init__(self, window_id, number, slave=1, fc=3, address=0, qty=10,
                  scan_ms=MASTER_DEFAULT_SCAN_MS, base=0, fmt=DEFAULT_FORMAT,
-                 names=None, enabled=True):
+                 names=None, enabled=True, title="", formats=None, scales=None):
         self.window_id = window_id
         self.number = number
+        # User-chosen window name; empty means the default "Janela N".
+        self.title = str(title or "").strip()[:MASTER_MAX_TITLE_LENGTH]
         self.slave = slave
         self.fc = fc
         self.address = address
@@ -89,6 +136,12 @@ class MasterWindow:
         self.base = base
         self.fmt = fmt
         self.names = dict(names or {})  # PDU address -> label
+        # PDU address -> format of the value that starts there (per-address
+        # formats chosen with the right-click menu); others use self.fmt.
+        self.formats = {int(a): f for a, f in (formats or {}).items() if f in FORMAT_SIZES}
+        # PDU address -> scale (raw/engineering points, decimals, unit) of the
+        # value that starts there.
+        self.scales = {int(a): dict(s) for a, s in (scales or {}).items()}
         self.enabled = enabled
         self.popped = False
         self.reset_counters()
@@ -99,6 +152,8 @@ class MasterWindow:
         self.timeouts = 0
         self.response_ms = None
         self.values = None
+        # True when the latest read failed: the shown values are out of date.
+        self.stale = False
         # (canonical PT template, values, style) shown on the status line.
         self.message = ("", {}, "normal")
         self.message_at = 0.0
@@ -109,11 +164,24 @@ class MasterWindow:
 
     def to_json(self):
         return {
+            "title": self.title,
             "slave": self.slave, "fc": self.fc, "address": self.address,
             "qty": self.qty, "scan_ms": self.scan_ms, "base": self.base,
             "format": self.fmt, "enabled": self.enabled,
             "names": {str(address): name for address, name in sorted(self.names.items())},
+            "formats": {str(address): fmt for address, fmt in sorted(self.formats.items())},
+            "scales": {str(address): scale for address, scale in sorted(self.scales.items())},
         }
+
+    def groups(self):
+        """[(row offset, size, fmt or None)] of the values shown in this window."""
+        return register_groups(self.qty, self.address, self.fmt, self.formats)
+
+    def group_of_row(self, row):
+        for offset, size, fmt in self.groups():
+            if offset <= row < offset + size:
+                return offset, size, fmt
+        return row, 1, None
 
     @staticmethod
     def validated_kwargs(data):
@@ -128,7 +196,20 @@ class MasterWindow:
             raise ValueError("Scan rate fora do intervalo.")
         fmt = data.get("format", DEFAULT_FORMAT)
         names = data.get("names", {})
+        formats = data.get("formats", {})
+        scales = {}
+        for key, item in (data.get("scales", {}) or {}).items() \
+                if isinstance(data.get("scales", {}), dict) else ():
+            try:
+                if not str(key).isdigit() or int(key) > 0xFFFF or not isinstance(item, dict):
+                    raise ValueError
+                raw, eng = item.get("raw", []), item.get("eng", [])
+                scales[int(key)] = validate_scale(raw[0], raw[1], eng[0], eng[1],
+                                                  item.get("decimals", 1), item.get("unit", ""))
+            except (ValueError, TypeError, IndexError):
+                continue
         return {
+            "title": str(data.get("title", "") or "").strip()[:MASTER_MAX_TITLE_LENGTH],
             "slave": slave, "fc": fc, "address": address, "qty": qty,
             "scan_ms": scan_ms, "base": 1 if data.get("base") == 1 else 0,
             "fmt": fmt if fmt in FORMAT_SIZES else DEFAULT_FORMAT,
@@ -137,7 +218,46 @@ class MasterWindow:
                 int(k): str(v) for k, v in (names.items() if isinstance(names, dict) else ())
                 if str(k).isdigit() and str(v).strip()
             },
+            "formats": {
+                int(k): v for k, v in (formats.items() if isinstance(formats, dict) else ())
+                if str(k).isdigit() and int(k) <= 0xFFFF and v in FORMAT_SIZES
+            },
+            "scales": scales,
         }
+
+
+def apply_format_to_rows(window, rows, fmt):
+    """Set the per-address format of the selected rows of *window*.
+
+    16-bit formats apply to every selected row. Multi-register formats need
+    consecutive rows in a multiple of the format size and are applied in
+    groups (2 registers for 32-bit, 4 for 64-bit). *fmt* None restores the
+    window format. Existing per-address formats overlapping the selection are
+    removed. Raises ValueError (PT canonical message) for an invalid selection.
+    """
+    rows = sorted(set(int(r) for r in rows))
+    if not rows:
+        raise ValueError("Seleciona pelo menos um endereço.")
+    size = FORMAT_SIZES[fmt] if fmt else 1
+    if size > 1:
+        if rows != list(range(rows[0], rows[0] + len(rows))):
+            raise ValueError("Seleciona registos seguidos para este formato.")
+        if len(rows) % size:
+            raise ValueError(
+                "Este formato ocupa {size} registos: seleciona {size} registos seguidos "
+                "(ou um múltiplo de {size})."
+            )
+        if rows[-1] >= window.qty:
+            raise ValueError("Seleciona registos seguidos para este formato.")
+
+    covered = {window.address + r for r in rows}
+    for start, existing in list(window.formats.items()):
+        span = set(range(start, start + FORMAT_SIZES[existing]))
+        if span & covered:
+            del window.formats[start]
+    if fmt is not None:
+        for index in range(0, len(rows), size):
+            window.formats[window.address + rows[index]] = fmt
 
 
 class MasterMixin:
@@ -156,6 +276,11 @@ class MasterMixin:
         self.master_serial = None
         self.master_active = False
         self._master_reflow_after_id = None
+        # Workspace state: name of the open workspace, whether it changed since
+        # it was opened/saved, and a guard that suppresses change tracking
+        # while a workspace is being loaded.
+        self.master_workspace_dirty = False
+        self._master_loading = False
 
         page.columnconfigure(0, weight=1)
         page.rowconfigure(2, weight=1)
@@ -239,14 +364,27 @@ class MasterMixin:
         toolbar.columnconfigure(3, weight=1)
         ttk.Button(toolbar, text="Nova janela", command=self.master_add_window).grid(
             row=0, column=0, padx=(0, 6))
-        ttk.Button(toolbar, text="Abrir workspace", command=self.master_open_workspace).grid(
-            row=0, column=1, padx=(0, 6))
-        ttk.Button(toolbar, text="Guardar workspace", command=self.master_save_workspace).grid(
+        # Workspace menu: the saved workspaces are listed directly in it.
+        self.master_workspace_btn = ttk.Menubutton(toolbar, text="Workspace")
+        self.master_workspace_btn.grid(row=0, column=1, padx=(0, 6))
+        self.master_workspace_menu = tk.Menu(
+            self.master_workspace_btn, tearoff=False,
+            postcommand=self._master_build_workspace_menu,
+        )
+        self.master_workspace_btn.configure(menu=self.master_workspace_menu)
+        self.master_workspace_var = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self.master_workspace_var).grid(
             row=0, column=2, padx=(0, 6))
+        self.master_current_workspace = ""
+        self._master_update_workspace_label()
+        title_font = tkfont.nametofont("TkDefaultFont").copy()
+        title_font.configure(weight="bold")
+        self._master_title_font = title_font
+        self.ui_style.configure("MBS.Master.Title.TLabel", font=title_font)
         ttk.Label(
             toolbar,
-            text=("Uma janela por Slave / zona de memória. Duplo clique num valor para "
-                  "escrever; duplo clique num nome para o editar."),
+            text=("Duplo clique num valor para escrever, num nome para o editar. "
+                  "Clique direito: formato, copiar e base."),
         ).grid(row=0, column=3, sticky="w", padx=(12, 0))
 
         holder = ttk.Frame(page)
@@ -279,7 +417,21 @@ class MasterMixin:
                          self.master_timeout_var, self.master_delay_var):
             variable.trace_add("write", lambda *_a: self._schedule_ui_settings_save())
 
-        self.master_add_window()
+        self._master_build_row_menu()
+
+        # Reopen the workspace used last time; it is loaded once the window is
+        # complete so the COM port list is already known. Never connects.
+        last = saved.get("last_workspace", "")
+        if last and last in list_workspaces():
+            self.after(10, lambda: self._master_restore_workspace(last))
+        else:
+            self.master_add_window()
+            self.master_workspace_dirty = False
+
+    def _master_restore_workspace(self, name):
+        if not self.master_open_workspace(name, quiet=True):
+            self.master_add_window()
+            self.master_workspace_dirty = False
 
     # -- helpers ---------------------------------------------------------------
     def _master_install_wheel_tags(self, root_widget):
@@ -317,13 +469,15 @@ class MasterMixin:
             pass
         return "break"
 
+    def _master_window_name(self, window):
+        return window.title or self.trf("Janela {number}", number=window.number)
+
+    def _master_window_summary(self, window):
+        return (f"Slave {window.slave} · FC{window.fc:02d} · "
+                f"{window.address + window.base} · {window.qty}")
+
     def _master_window_title(self, window):
-        shown = window.address + window.base
-        return self.trf(
-            "Janela {number} — Slave {slave} · FC{fc:02d} · {address} · {qty}",
-            number=window.number, slave=window.slave, fc=window.fc,
-            address=shown, qty=window.qty,
-        )
+        return f"{self._master_window_name(window)} — {self._master_window_summary(window)}"
 
     def _master_counters_text(self, window):
         response = f"{window.response_ms:.1f} ms" if window.response_ms is not None else "—"
@@ -350,7 +504,8 @@ class MasterMixin:
                 "error": "MBS.Master.Error.TLabel",
                 "ok": "MBS.Master.Ok.TLabel",
             }.get(style, "TLabel"))
-            pane["frame"].configure(text=self._master_window_title(window))
+            pane["name_var"].set(self._master_window_name(window))
+            pane["summary_var"].set(self._master_window_summary(window))
             pane["pause_btn"].configure(text=self.tr("Retomar" if not window.enabled else "Pausar"))
             pane["popout_btn"].configure(text=self.tr("Ancorar" if window.popped else "Destacar"))
             if window.popped and pane.get("toplevel") is not None:
@@ -360,19 +515,43 @@ class MasterMixin:
 
     # -- panes -------------------------------------------------------------------
     def _master_build_pane(self, window, parent):
-        frame = ttk.LabelFrame(parent, text=self._master_window_title(window))
+        frame = ttk.LabelFrame(parent, text="")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(4, weight=1)
+        frame.rowconfigure(5, weight=1)
         pane = {"frame": frame}
+        window_id = window.window_id
+
+        # Header: window name + summary on the left; Rename / Pop out / close on
+        # the right, so closing a window never depends on the pane being wide.
+        header = ttk.Frame(frame)
+        header.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 2))
+        header.columnconfigure(1, weight=1)
+        pane["name_var"] = tk.StringVar()
+        pane["summary_var"] = tk.StringVar()
+        name_label = ttk.Label(header, textvariable=pane["name_var"],
+                               style="MBS.Master.Title.TLabel")
+        name_label.grid(row=0, column=0, sticky="w")
+        name_label.bind("<Double-1>", lambda _e: self.master_rename_window(window_id))
+        ttk.Label(header, textvariable=pane["summary_var"]).grid(
+            row=0, column=1, sticky="w", padx=(10, 0))
+        header_buttons = ttk.Frame(header)
+        header_buttons.grid(row=0, column=2, sticky="e")
+        ttk.Button(header_buttons, text="Renomear", width=10,
+                   command=lambda: self.master_rename_window(window_id)).grid(
+            row=0, column=0, padx=(0, 3))
+        pane["popout_btn"] = ttk.Button(header_buttons, text="Destacar", width=10,
+                                        command=lambda: self.master_toggle_popout(window_id))
+        pane["popout_btn"].grid(row=0, column=1, padx=(0, 3))
+        ttk.Button(header_buttons, text="✕", width=3,
+                   command=lambda: self.master_close_window(window_id)).grid(row=0, column=2)
 
         definition = ttk.Frame(frame)
-        definition.grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        definition.grid(row=1, column=0, sticky="w", padx=6, pady=(2, 2))
         pane["slave_var"] = tk.StringVar(value=str(window.slave))
         pane["fc_var"] = tk.StringVar(value=fc_choice_label(window.fc))
         pane["address_var"] = tk.StringVar(value=str(window.address + window.base))
         pane["qty_var"] = tk.StringVar(value=str(window.qty))
         pane["scan_var"] = tk.StringVar(value=str(window.scan_ms))
-        pane["base_var"] = tk.StringVar(value=str(window.base))
         pane["format_var"] = tk.StringVar(value=FORMAT_LABELS[window.fmt])
 
         layout = (
@@ -388,15 +567,13 @@ class MasterMixin:
             widget.grid(row=0, column=index * 2 + 1, padx=(0, 10))
 
         definition2 = ttk.Frame(frame)
-        definition2.grid(row=1, column=0, sticky="w", padx=6, pady=2)
+        definition2.grid(row=2, column=0, sticky="w", padx=6, pady=2)
         format_combo = ttk.Combobox(
             definition2, values=[FORMAT_LABELS[k] for k in FORMAT_LABELS], width=20,
             state="readonly", textvariable=pane["format_var"],
         )
         layout2 = (
             ("Scan (ms)", ttk.Entry(definition2, width=7, textvariable=pane["scan_var"])),
-            ("Base", ttk.Combobox(definition2, values=("0", "1"), width=2, state="readonly",
-                                  textvariable=pane["base_var"])),
             ("Formato", format_combo),
         )
         for index, (caption, widget) in enumerate(layout2):
@@ -405,26 +582,23 @@ class MasterMixin:
         pane["format_combo"] = format_combo
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=2, column=0, sticky="w", padx=6, pady=(2, 2))
-        window_id = window.window_id
+        buttons.grid(row=3, column=0, sticky="w", padx=6, pady=(2, 2))
         actions = (
             ("Aplicar", lambda: self.master_apply_window(window_id)),
             ("Pausar", lambda: self.master_toggle_pause(window_id)),
             ("Ler 1x", lambda: self.master_read_once(window_id)),
             ("Duplicar", lambda: self.master_duplicate_window(window_id)),
-            ("Destacar", lambda: self.master_toggle_popout(window_id)),
-            ("Fechar", lambda: self.master_close_window(window_id)),
         )
         for index, (caption, command) in enumerate(actions):
             button = ttk.Button(buttons, text=caption, command=command, width=10)
             button.grid(row=0, column=index, padx=(0, 3))
             if caption == "Pausar":
                 pane["pause_btn"] = button
-            elif caption == "Destacar":
-                pane["popout_btn"] = button
+            elif caption == "Aplicar":
+                pane["apply_btn"] = button
 
         status = ttk.Frame(frame)
-        status.grid(row=3, column=0, sticky="ew", padx=6, pady=(2, 2))
+        status.grid(row=4, column=0, sticky="ew", padx=6, pady=(2, 2))
         status.columnconfigure(1, weight=1)
         pane["counters_var"] = tk.StringVar()
         pane["message_var"] = tk.StringVar()
@@ -432,12 +606,15 @@ class MasterMixin:
         pane["message_label"] = ttk.Label(status, textvariable=pane["message_var"])
         pane["message_label"].grid(row=0, column=1, sticky="w", padx=(14, 0))
 
-        table = ttk.Frame(frame)
-        table.grid(row=4, column=0, sticky="nsew", padx=6, pady=(2, 6))
+        # Thin 1 px frame around the table (classic Tk highlight ring, coloured
+        # from the palette in _master_configure_tree_tags()).
+        table = tk.Frame(frame, borderwidth=0, highlightthickness=1)
+        table.grid(row=5, column=0, sticky="nsew", padx=6, pady=(2, 6))
         table.columnconfigure(0, weight=1)
         table.rowconfigure(0, weight=1)
+        pane["table_frame"] = table
         tree = ttk.Treeview(table, columns=("address", "name", "value"), show="headings",
-                            height=MASTER_PANE_ROWS, selectmode="browse")
+                            height=MASTER_PANE_MAX_ROWS, selectmode="extended")
         for column, caption, width, anchor in (
             ("address", "Endereço", 90, "center"),
             ("name", "Nome", 200, "w"),
@@ -451,7 +628,14 @@ class MasterMixin:
         tree.configure(yscrollcommand=scrollbar.set)
         tree.bind("<Double-1>", lambda e: self._master_on_double_click(window_id, e))
         tree.bind("<Return>", lambda e: self._master_edit_value(window_id))
+        tree.bind("<Button-3>", lambda e: self._master_show_row_menu(window_id, e))
+        tree.bind("<ButtonPress-1>", lambda e: self._master_drag_start(window_id, e), add="+")
+        tree.bind("<B1-Motion>", lambda e: self._master_drag_move(window_id, e))
+        tree.bind("<ButtonRelease-1>", lambda e: self._master_drag_stop(window_id), add="+")
+        for sequence in ("<Control-c>", "<Control-C>"):
+            tree.bind(sequence, lambda _e: self.master_copy_rows(window_id) or "break")
         pane["tree"] = tree
+        self._master_configure_tree_tags(tree)
 
         for widget in (definition, definition2):
             for child in widget.winfo_children():
@@ -459,7 +643,7 @@ class MasterMixin:
                     child.bind("<Return>", lambda _e: self.master_apply_window(window_id))
 
         # Captions were written in canonical PT; show them in the current language.
-        for widget in (definition, definition2, buttons):
+        for widget in (definition, definition2, buttons, header_buttons):
             for child in widget.winfo_children():
                 try:
                     if "text" in child.keys() and child.cget("text"):
@@ -468,9 +652,13 @@ class MasterMixin:
                     pass
 
         self._master_panes[window_id] = pane
+        for name in ("slave_var", "fc_var", "address_var", "qty_var", "scan_var", "format_var"):
+            pane[name].trace_add("write",
+                                 lambda *_a: self._master_update_apply_state(window_id))
         self._master_fill_rows(window)
         self._master_update_format_state(window)
         self._master_render_status(window)
+        self._master_update_apply_state(window_id)
         self._master_install_wheel_tags(frame)
         return frame
 
@@ -486,23 +674,29 @@ class MasterMixin:
             return
         tree = pane["tree"]
         tree.delete(*tree.get_children())
+        tree.configure(height=max(MASTER_PANE_MIN_ROWS, min(MASTER_PANE_MAX_ROWS, window.qty)))
         for index in range(window.qty):
             pdu = window.address + index
-            tree.insert("", "end", iid=f"r{index}",
+            tree.insert("", "end", iid=f"r{index}", tags=self._master_row_tags(index),
                         values=(pdu + window.base, window.names.get(pdu, ""), ""))
         self._master_render_values(window)
 
     def _master_render_values(self, window):
         pane = self._master_panes.get(window.window_id)
-        if pane is None or window.values is None:
+        if pane is None:
             return
-        if window.fc in BIT_FUNCTION_CODES:
+        tree = pane["tree"]
+        stale = ("stale",) if window.stale else ()
+        if window.values is None:
+            texts = [""] * window.qty
+        elif window.fc in BIT_FUNCTION_CODES:
             texts = [str(v) for v in window.values]
         else:
-            texts = format_register_values(window.values, window.fmt)
-        tree = pane["tree"]
+            texts = format_window_values(window.values, window.address, window.fmt,
+                                         window.formats, window.scales)
         for index, text in enumerate(texts[:window.qty]):
             try:
+                tree.item(f"r{index}", tags=self._master_row_tags(index) + stale)
                 tree.set(f"r{index}", "value", text)
             except tk.TclError:
                 pass
@@ -523,7 +717,14 @@ class MasterMixin:
         canvas.itemconfigure(self._master_grid_item, width=width)
         docked = [w for w in sorted(self.master_windows.values(), key=lambda w: w.number)
                   if not w.popped]
-        columns = max(1, width // MASTER_PANE_MIN_WIDTH)
+        # Use the real requested pane width (it grows with Windows display
+        # scaling) so columns never become narrower than their contents.
+        pane_width = MASTER_PANE_MIN_WIDTH
+        for window in docked:
+            pane = self._master_panes.get(window.window_id)
+            if pane is not None:
+                pane_width = max(pane_width, pane["frame"].winfo_reqwidth() + 8)
+        columns = max(1, width // pane_width)
         for column in range(8):
             self.master_grid.columnconfigure(column, weight=1 if column < columns else 0,
                                              uniform="master_panes" if column < columns else "")
@@ -555,6 +756,7 @@ class MasterMixin:
         self._master_reflow()
         if self.master_engine is not None:
             self.master_engine.set_poll(window.definition())
+        self._master_mark_changed()
         return window
 
     def master_duplicate_window(self, window_id):
@@ -577,6 +779,14 @@ class MasterMixin:
             except tk.TclError:
                 pass
         self._master_reflow()
+        if not self.master_windows and not self._master_loading:
+            # Closing every window leaves no workspace open.
+            self.master_current_workspace = ""
+            self.master_workspace_dirty = False
+            self._master_update_workspace_label()
+            self._schedule_ui_settings_save()
+        else:
+            self._master_mark_changed()
 
     def master_apply_window(self, window_id):
         window = self.master_windows.get(window_id)
@@ -584,7 +794,7 @@ class MasterMixin:
         if window is None or pane is None:
             return False
         try:
-            base = 1 if pane["base_var"].get() == "1" else 0
+            base = window.base
             slave = parse_int_field(pane["slave_var"].get(), 1, 247,
                                     "O Slave ID de leitura tem de estar entre 1 e 247.")
             fc = int(pane["fc_var"].get()[:2])
@@ -599,18 +809,22 @@ class MasterMixin:
             messagebox.showerror(self.tr("Janela inválida"), self.tr(str(exc)))
             return False
 
+        fmt = FORMAT_KEYS_BY_LABEL.get(pane["format_var"].get(), DEFAULT_FORMAT)
         changed_area = (slave, fc, address, qty) != (window.slave, window.fc,
                                                      window.address, window.qty)
+        changed = changed_area or (scan_ms, fmt) != (window.scan_ms, window.fmt)
         window.slave, window.fc, window.address, window.qty = slave, fc, address, qty
-        window.scan_ms, window.base = scan_ms, base
-        window.fmt = FORMAT_KEYS_BY_LABEL.get(pane["format_var"].get(), DEFAULT_FORMAT)
+        window.scan_ms, window.fmt = scan_ms, fmt
         if changed_area:
             window.reset_counters()
         self._master_fill_rows(window)
         self._master_update_format_state(window)
         self._master_render_status(window)
+        self._master_update_apply_state(window_id)
         if self.master_engine is not None:
             self.master_engine.set_poll(window.definition())
+        if changed:
+            self._master_mark_changed()
         return True
 
     def master_toggle_pause(self, window_id):
@@ -623,6 +837,7 @@ class MasterMixin:
         self._master_render_status(window)
         if self.master_engine is not None:
             self.master_engine.set_poll(window.definition())
+        self._master_mark_changed()
 
     def master_read_once(self, window_id):
         if self.master_engine is None:
@@ -707,6 +922,7 @@ class MasterMixin:
             pane = self._master_panes.get(window_id)
             if pane is not None:
                 pane["tree"].set(row, "name", name)
+            self._master_mark_changed()
             dialog.destroy()
 
         ttk.Button(body, text=self.tr("Guardar"), command=save).grid(row=2, column=0, sticky="e")
@@ -731,13 +947,24 @@ class MasterMixin:
             )
             return
         bits = window.fc in BIT_FUNCTION_CODES
-        size = 1 if bits else FORMAT_SIZES[window.fmt]
-        index -= index % size  # 32-bit values start on the first register of the pair
+        if bits:
+            size, fmt = 1, None
+        else:
+            # Multi-register values start on the first register of their group.
+            index, size, fmt = window.group_of_row(index)
+            if fmt is None:
+                messagebox.showinfo(
+                    self.tr("Escrita"),
+                    self.tr("Este endereço não tem um valor completo no formato atual."),
+                )
+                return
         current = ""
         try:
             current = pane["tree"].set(f"r{index}", "value")
         except tk.TclError:
             pass
+        if not bits and window.scales.get(window.address + index, {}).get("unit"):
+            current = current.rsplit(" ", 1)[0]
 
         dialog, body = self._master_dialog(self.tr("Escrever"))
         slave_var = tk.StringVar(value=str(window.slave))
@@ -765,7 +992,13 @@ class MasterMixin:
             single.configure(state="disabled")
         ttk.Radiobutton(functions, text=fc_choice_label_write(multiple_fc),
                         variable=fc_var, value=multiple_fc).grid(row=1, column=0, sticky="w")
-        format_text = "0 / 1" if bits else FORMAT_LABELS[window.fmt]
+        scale = None if bits else window.scales.get(window.address + index)
+        if scale is not None and fmt in ("hex16", "bin16"):
+            scale = None
+        format_text = "0 / 1" if bits else FORMAT_LABELS[fmt]
+        if scale is not None:
+            format_text += " · " + self.trf("valores em unidades da escala {unit}",
+                                            unit=scale.get("unit") or "")
         ttk.Label(
             body,
             text=self.trf("Formato: {fmt}. Vários valores (FC15/FC16): separar com ;",
@@ -778,7 +1011,8 @@ class MasterMixin:
         def send(_event=None):
             try:
                 request, description = self.master_build_write(
-                    window, slave_var.get(), address_var.get(), value_var.get(), fc_var.get()
+                    window, slave_var.get(), address_var.get(), value_var.get(),
+                    fc_var.get(), fmt, scale,
                 )
             except ValueError as exc:
                 message_var.set(self.tr(str(exc)))
@@ -799,8 +1033,15 @@ class MasterMixin:
         rows[2][1].select_range(0, "end")
         dialog.grab_set()
 
-    def master_build_write(self, window, slave_text, address_text, values_text, fc):
-        """Validate the write dialog fields and return (request, description)."""
+    def master_build_write(self, window, slave_text, address_text, values_text, fc,
+                           fmt=None, scale=None):
+        """Validate the write dialog fields and return (request, description).
+
+        *fmt* is the format of the clicked value (per-address or window format).
+        With *scale*, the typed values are engineering units and are converted
+        back to raw values before encoding.
+        """
+        fmt = fmt or window.fmt
         slave = parse_int_field(slave_text, 0, 247,
                                 "O Slave ID de escrita tem de estar entre 0 (broadcast) e 247.")
         address = parse_int_field(address_text, window.base, 0xFFFF + window.base,
@@ -813,7 +1054,9 @@ class MasterMixin:
         else:
             values = []
             for part in parts:
-                values.extend(encode_register_value(part, window.fmt))
+                if scale is not None:
+                    part = raw_text_for_scaled(part, scale, fmt)
+                values.extend(encode_register_value(part, fmt))
         if fc in (5, 6) and len(values) != 1:
             raise ValueError("FC05/FC06 escrevem um único valor; usa FC15/FC16 para vários.")
         request = build_write_request(slave, fc, address, values)
@@ -887,6 +1130,10 @@ class MasterMixin:
             response_timeout_ms=settings["response_timeout_ms"],
             delay_ms=settings["delay_ms"], serial_module=serial,
             idle_check_seconds=DISCOVERY_IDLE_CHECK_SECONDS,
+            reopen=lambda: self.open_discovery_serial_port(
+                serial, settings["port"], settings["baud"], settings["parity"],
+                settings["stopbits"],
+            ),
         )
         for window in self.master_windows.values():
             window.reset_counters()
@@ -927,6 +1174,7 @@ class MasterMixin:
         self.master_engine = None
         if engine is not None:
             engine.stop(join_timeout=0.5)
+            self.master_serial = engine.ser
         if self.master_serial is not None:
             try:
                 self.master_serial.close()
@@ -937,6 +1185,10 @@ class MasterMixin:
         self.busy = False
         self._master_lock_other_features(False)
         self.master_status_var.set(self.tr("Desligado"))
+        for window in self.master_windows.values():
+            if window.values is not None and not window.stale:
+                window.stale = True
+                self._master_render_values(window)
 
         error = (payload or {}).get("error")
         if error:
@@ -955,6 +1207,20 @@ class MasterMixin:
     # -- worker events -------------------------------------------------------------
     def handle_master_event(self, event, payload):
         if event == "master_ready":
+            self.master_status_var.set(self.tr("● Ligado"))
+        elif event == "master_reconnecting":
+            self.master_status_var.set(self.trf(
+                "A religar a {port}… (porta falhou: {error})",
+                port=self.master_port_var.get(), error=(payload or {}).get("error", ""),
+            ))
+            for window in self.master_windows.values():
+                if window.values is not None and not window.stale:
+                    window.stale = True
+                    self._master_render_values(window)
+        elif event == "master_reconnected":
+            engine = self.master_engine
+            if engine is not None:
+                self.master_serial = engine.ser
             self.master_status_var.set(self.tr("● Ligado"))
         elif event == "master_stopped":
             self._master_finish_session(payload)
@@ -977,6 +1243,7 @@ class MasterMixin:
                 return  # definition changed while the request was on the bus
             if status == "ok":
                 window.values = result["values"]
+                window.stale = False
                 self._master_render_values(window)
                 # A successful read clears errors; a write confirmation stays
                 # visible for a few seconds so the user can see it.
@@ -996,6 +1263,9 @@ class MasterMixin:
             return
 
         window.errors += 1
+        if result["kind"] == "read" and not window.stale:
+            window.stale = True
+            self._master_render_values(window)
         if status == "timeout":
             window.timeouts += 1
             self._master_set_message(window, "Timeout", "error")
@@ -1025,39 +1295,137 @@ class MasterMixin:
                                                      key=lambda w: w.number)],
         }
 
-    def master_save_workspace(self, path=None):
-        if path is None:
-            path = filedialog.asksaveasfilename(
-                parent=self, title=self.tr("Guardar workspace"), defaultextension=".mbsw",
-                filetypes=[("MBSniffer workspace", "*.mbsw"), ("JSON", "*.json")],
+    def _master_update_workspace_label(self):
+        name = getattr(self, "master_current_workspace", "")
+        if not name:
+            text = ""
+        elif getattr(self, "master_workspace_dirty", False):
+            text = self.trf("Workspace atual: {name} (alterado)", name=name)
+        else:
+            text = self.trf("Workspace atual: {name}", name=name)
+        self.master_workspace_var.set(text)
+
+    def _master_mark_changed(self):
+        """Record a change to the open workspace (ignored while loading one)."""
+        if getattr(self, "_master_loading", False):
+            return
+        if self.master_current_workspace and not self.master_workspace_dirty:
+            self.master_workspace_dirty = True
+            self._master_update_workspace_label()
+
+    def _master_build_workspace_menu(self):
+        """Rebuild the Workspace menu from the files in the workspace folder."""
+        menu = self.master_workspace_menu
+        menu.delete(0, "end")
+        for child in menu.winfo_children():
+            child.destroy()
+        names = list_workspaces()
+
+        menu.add_command(label=self.tr("Guardar workspace…"),
+                         command=self.master_save_workspace)
+        open_menu = tk.Menu(menu, tearoff=False)
+        delete_menu = tk.Menu(menu, tearoff=False)
+        for name in names:
+            open_menu.add_command(label=name,
+                                  command=lambda n=name: self.master_open_workspace(n))
+            delete_menu.add_command(label=name,
+                                    command=lambda n=name: self.master_delete_workspace(n))
+        if not names:
+            for submenu in (open_menu, delete_menu):
+                submenu.add_command(label=self.tr("(nenhum workspace guardado)"),
+                                    state="disabled")
+        menu.add_cascade(label=self.tr("Abrir workspace"), menu=open_menu)
+        menu.add_cascade(label=self.tr("Apagar workspace"), menu=delete_menu)
+        menu.add_separator()
+        menu.add_command(label=self.tr("Abrir pasta dos workspaces"),
+                         command=self.master_open_workspace_folder)
+        self._master_apply_menu_palette()
+
+    def master_save_workspace(self, name=None):
+        """Save all windows as a named workspace in the workspace folder."""
+        if name is None:
+            name = self._master_ask_text(
+                self.tr("Guardar workspace"), self.tr("Nome do workspace"),
+                self.master_current_workspace or self.tr("Workspace 1"),
             )
-        if not path:
+            if name is None:
+                return False
+        try:
+            name = validate_workspace_name(name)
+        except ValueError as exc:
+            messagebox.showerror(self.tr("Guardar workspace"), self.tr(str(exc)))
             return False
+        path = workspace_path(name)
+        if path.exists() and name != self.master_current_workspace:
+            if not messagebox.askyesno(
+                self.tr("Guardar workspace"),
+                self.trf("Já existe um workspace chamado \"{name}\". Substituir?", name=name),
+            ):
+                return False
         try:
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(self.master_workspace_data(), handle, indent=2, ensure_ascii=False)
-            return True
         except OSError as exc:
             messagebox.showerror(self.tr("Guardar workspace"), str(exc))
             return False
+        self.master_current_workspace = name
+        self.master_workspace_dirty = False
+        self._master_update_workspace_label()
+        self._schedule_ui_settings_save()
+        return True
 
-    def master_open_workspace(self, path=None):
-        if path is None:
-            path = filedialog.askopenfilename(
-                parent=self, title=self.tr("Abrir workspace"),
-                filetypes=[("MBSniffer workspace", "*.mbsw"), ("JSON", "*.json")],
-            )
-        if not path:
+    def master_delete_workspace(self, name, confirm=True):
+        if confirm and not messagebox.askyesno(
+            self.tr("Apagar workspace"),
+            self.trf("Apagar o workspace \"{name}\"?", name=name),
+        ):
             return False
         try:
-            with open(path, encoding="utf-8") as handle:
+            workspace_path(name).unlink()
+        except OSError as exc:
+            messagebox.showerror(self.tr("Apagar workspace"), str(exc))
+            return False
+        if name == self.master_current_workspace:
+            self.master_current_workspace = ""
+            self.master_workspace_dirty = False
+            self._master_update_workspace_label()
+            self._schedule_ui_settings_save()
+        return True
+
+    def master_open_workspace_folder(self):
+        folder = get_workspaces_folder()
+        try:
+            if os.name == "nt":
+                os.startfile(str(folder))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except Exception as exc:
+            messagebox.showerror(self.tr("Abrir pasta dos workspaces"), str(exc))
+
+    def master_open_workspace(self, name, quiet=False):
+        """Replace the current windows with a saved workspace (by name).
+
+        *quiet* (start-up restore) suppresses the error dialog when the file
+        cannot be read.
+        """
+        try:
+            with open(workspace_path(name), encoding="utf-8") as handle:
                 data = json.load(handle)
             if not isinstance(data, dict) or data.get("format") != MASTER_WORKSPACE_FORMAT:
                 raise ValueError(self.tr("O ficheiro não é um workspace do MBSniffer."))
         except (OSError, ValueError) as exc:
-            messagebox.showerror(self.tr("Abrir workspace"), str(exc))
+            if not quiet:
+                messagebox.showerror(self.tr("Abrir workspace"), str(exc))
             return False
+        self._master_loading = True
+        try:
+            return self._master_load_workspace_data(name, data)
+        finally:
+            self._master_loading = False
 
+    def _master_load_workspace_data(self, name, data):
         entries, skipped = [], 0
         for item in data.get("windows", [])[:MASTER_MAX_WINDOWS]:
             try:
@@ -1083,6 +1451,10 @@ class MasterMixin:
                 self.master_port_var.set(connection["port"])
         for kwargs in entries:
             self.master_add_window(kwargs)
+        self.master_current_workspace = name
+        self.master_workspace_dirty = False
+        self._master_update_workspace_label()
+        self._schedule_ui_settings_save()
         if skipped:
             messagebox.showwarning(
                 self.tr("Abrir workspace"),
@@ -1090,10 +1462,456 @@ class MasterMixin:
             )
         return True
 
+    # -- window rename ---------------------------------------------------------------
+    def _master_ask_text(self, title, caption, initial):
+        """Small modal text prompt; returns the text or None when cancelled."""
+        dialog, body = self._master_dialog(title)
+        ttk.Label(body, text=caption).grid(row=0, column=0, columnspan=2, sticky="w")
+        value = tk.StringVar(value=initial)
+        entry = ttk.Entry(body, textvariable=value, width=36)
+        entry.grid(row=1, column=0, columnspan=2, pady=(4, 10), sticky="ew")
+        result = {"text": None}
+
+        def accept(_event=None):
+            result["text"] = value.get()
+            dialog.destroy()
+
+        ttk.Button(body, text=self.tr("OK"), command=accept,
+                   style="MBS.Primary.TButton").grid(row=2, column=0, sticky="e", padx=(0, 6))
+        ttk.Button(body, text=self.tr("Cancelar"), command=dialog.destroy).grid(
+            row=2, column=1, sticky="e")
+        entry.bind("<Return>", accept)
+        entry.bind("<Escape>", lambda _e: dialog.destroy())
+        entry.focus_set()
+        entry.select_range(0, "end")
+        dialog.grab_set()
+        self.wait_window(dialog)
+        return result["text"]
+
+    def master_rename_window(self, window_id, name=None):
+        window = self.master_windows.get(window_id)
+        if window is None:
+            return
+        if name is None:
+            name = self._master_ask_text(
+                self.tr("Renomear janela"),
+                self.tr("Nome da janela (vazio = nome por defeito)"),
+                self._master_window_name(window),
+            )
+            if name is None:
+                return
+        name = name.strip()[:MASTER_MAX_TITLE_LENGTH]
+        if name == self.trf("Janela {number}", number=window.number):
+            name = ""
+        window.title = name
+        self._master_render_status(window)
+        self._master_mark_changed()
+
+    # -- apply highlight / table tags -------------------------------------------------
+    def _master_fields_changed(self, window, pane):
+        """True when the definition fields differ from what was last applied."""
+        try:
+            return (
+                pane["slave_var"].get().strip() != str(window.slave)
+                or pane["fc_var"].get() != fc_choice_label(window.fc)
+                or pane["address_var"].get().strip() != str(window.address + window.base)
+                or pane["qty_var"].get().strip() != str(window.qty)
+                or pane["scan_var"].get().strip() != str(window.scan_ms)
+                or FORMAT_KEYS_BY_LABEL.get(pane["format_var"].get()) != window.fmt
+            )
+        except tk.TclError:
+            return False
+
+    def _master_update_apply_state(self, window_id):
+        window = self.master_windows.get(window_id)
+        pane = self._master_panes.get(window_id)
+        if window is None or pane is None or "apply_btn" not in pane:
+            return
+        style = ("MBS.Primary.TButton" if self._master_fields_changed(window, pane)
+                 else "TButton")
+        try:
+            pane["apply_btn"].configure(style=style)
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _master_row_tags(index):
+        """Alternate rows get a slightly darker background (zebra striping)."""
+        return ("odd",) if index % 2 else ()
+
+    def _master_configure_tree_tags(self, tree):
+        dark = bool(getattr(self, "dark_mode_var", tk.BooleanVar(value=False)).get())
+        colors = theme_colors(self, dark)
+        try:
+            tree.tag_configure("stale", foreground=colors["disabled"])
+            tree.tag_configure("odd", background=MASTER_STRIPE_DARK if dark
+                               else MASTER_STRIPE_LIGHT)
+            frame = tree.master
+            if isinstance(frame, tk.Frame):
+                frame.configure(highlightbackground=colors["border"],
+                                highlightcolor=colors["border"],
+                                background=colors["input"])
+        except tk.TclError:
+            pass
+
+    # -- right-click menu: per-address format, copy, base ---------------------------
+    def _master_build_row_menu(self):
+        self._master_row_menu = tk.Menu(self, tearoff=False)
+
+    # -- drag selection ---------------------------------------------------------------
+    # ttk.Treeview has no rubber-band selection: pressing on a row and dragging
+    # selects every row from that row to the one under the pointer, scrolling
+    # when the pointer leaves the table. Ctrl+drag adds the block to the
+    # selection that existed before the press.
+    def _master_drag_start(self, window_id, event):
+        pane = self._master_panes.get(window_id)
+        if pane is None:
+            return
+        tree = pane["tree"]
+        row = tree.identify_row(event.y)
+        if not row or tree.identify_region(event.x, event.y) != "cell":
+            pane["drag"] = None
+            return
+        ctrl = bool(event.state & 0x0004)
+        before = tuple(tree.selection())
+        pane["drag"] = {"anchor": row, "base": before if ctrl else (), "y": event.y,
+                        "after_id": None}
+
+    def _master_drag_move(self, window_id, event):
+        pane = self._master_panes.get(window_id)
+        drag = pane.get("drag") if pane else None
+        if not drag:
+            return None
+        drag["y"] = event.y
+        self._master_drag_update(window_id)
+        return "break"
+
+    def _master_drag_update(self, window_id):
+        pane = self._master_panes.get(window_id)
+        drag = pane.get("drag") if pane else None
+        if not drag:
+            return
+        tree = pane["tree"]
+        drag["after_id"] = None
+        height = tree.winfo_height()
+        y = drag["y"]
+        if y < 0 or y > height:
+            # Pointer outside the rows: scroll and keep extending the block.
+            tree.yview_scroll(-1 if y < 0 else 1, "units")
+            y = 1 if y < 0 else height - 2
+            drag["after_id"] = self.after(60, lambda: self._master_drag_update(window_id))
+        row = tree.identify_row(y)
+        rows = tree.get_children()
+        if not row or drag["anchor"] not in rows:
+            return
+        first, last = sorted((rows.index(drag["anchor"]), rows.index(row)))
+        block = rows[first:last + 1]
+        tree.selection_set(tuple(dict.fromkeys(drag["base"] + tuple(block))))
+
+    def _master_drag_stop(self, window_id):
+        pane = self._master_panes.get(window_id)
+        drag = pane.get("drag") if pane else None
+        if drag and drag.get("after_id"):
+            try:
+                self.after_cancel(drag["after_id"])
+            except tk.TclError:
+                pass
+        if pane is not None:
+            pane["drag"] = None
+
+    def _master_selected_rows(self, window_id):
+        pane = self._master_panes.get(window_id)
+        if pane is None:
+            return []
+        return sorted(int(iid[1:]) for iid in pane["tree"].selection() if iid.startswith("r"))
+
+    def _master_show_row_menu(self, window_id, event):
+        window = self.master_windows.get(window_id)
+        pane = self._master_panes.get(window_id)
+        if window is None or pane is None:
+            return "break"
+        tree = pane["tree"]
+        row = tree.identify_row(event.y)
+        if row and row not in tree.selection():
+            tree.selection_set(row)
+
+        menu = self._master_row_menu
+        menu.delete(0, "end")
+        for child in menu.winfo_children():
+            child.destroy()
+
+        registers = window.fc not in BIT_FUNCTION_CODES
+        format_menu = tk.Menu(menu, tearoff=False)
+        sub_menus = {2: tk.Menu(format_menu, tearoff=False),
+                     4: tk.Menu(format_menu, tearoff=False)}
+        for key, label, size in REGISTER_FORMATS:
+            target = format_menu if size == 1 else sub_menus[size]
+            target.add_command(label=label,
+                               command=lambda k=key: self.master_set_row_format(window_id, k))
+        format_menu.add_separator()
+        format_menu.add_cascade(label=self.tr("32 bits (2 registos)"), menu=sub_menus[2])
+        format_menu.add_cascade(label=self.tr("64 bits (4 registos)"), menu=sub_menus[4])
+        menu.add_cascade(label=self.tr("Formato"), menu=format_menu,
+                         state="normal" if registers else "disabled")
+        menu.add_command(label=self.tr("Repor formato da janela"),
+                         command=lambda: self.master_set_row_format(window_id, None),
+                         state="normal" if registers else "disabled")
+        menu.add_command(label=self.tr("Escala…"),
+                         command=lambda: self.master_edit_scale(window_id),
+                         state="normal" if registers else "disabled")
+        menu.add_command(label=self.tr("Remover escala"),
+                         command=lambda: self.master_remove_scale(window_id),
+                         state="normal" if registers else "disabled")
+        menu.add_separator()
+        menu.add_command(label=self.tr("Copiar"), accelerator="Ctrl+C",
+                         command=lambda: self.master_copy_rows(window_id))
+        menu.add_separator()
+        base_menu = tk.Menu(menu, tearoff=False)
+        base_var = tk.IntVar(value=window.base)
+        pane["menu_base_var"] = base_var  # keep a reference while the menu lives
+        base_menu.add_radiobutton(label=self.tr("0 — PDU Address"), variable=base_var, value=0,
+                                  command=lambda: self.master_set_base(window_id, 0))
+        base_menu.add_radiobutton(label=self.tr("1 — numeração dos manuais"), variable=base_var,
+                                  value=1, command=lambda: self.master_set_base(window_id, 1))
+        menu.add_cascade(label=self.tr("Base de endereços"), menu=base_menu)
+        self._master_apply_menu_palette()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def master_set_row_format(self, window_id, fmt):
+        """Apply *fmt* (None = window format) to the selected rows."""
+        window = self.master_windows.get(window_id)
+        if window is None:
+            return False
+        try:
+            apply_format_to_rows(window, self._master_selected_rows(window_id), fmt)
+        except ValueError as exc:
+            size = FORMAT_SIZES.get(fmt, 1)
+            messagebox.showwarning(self.tr("Formato"), self.trf(str(exc), size=size))
+            return False
+        self._master_render_values(window)
+        self._master_mark_changed()
+        return True
+
+    # -- opening windows from Sniffer / Bus Slave Finder ------------------------------
+    def master_definition_from_record(self, record):
+        """Read definition (slave, fc, address, qty) behind a Traffic record, or None.
+
+        A REQUEST carries its own address/quantity; a matched RESPONSE or
+        EXCEPTION carries the ones of its request. Only FC01–FC04 qualify.
+        """
+        try:
+            slave = int(record.get("slave", ""))
+            fc = int(str(record.get("fc", "")), 16) & 0x7F
+        except (TypeError, ValueError):
+            return None
+        if fc not in READ_FUNCTION_CODES or not 1 <= slave <= 247:
+            return None
+        if record.get("type") == "REQUEST":
+            address, qty = record.get("pdu_address"), record.get("qty")
+        else:
+            address, qty = record.get("request_pdu_address"), record.get("request_qty")
+        if address is None or qty is None:
+            return None
+        try:
+            validate_read_definition(slave, fc, address, qty)
+        except ValueError:
+            return None
+        return {"slave": slave, "fc": fc, "address": int(address), "qty": int(qty)}
+
+    def master_open_from_record(self, record):
+        definition = self.master_definition_from_record(record)
+        if definition is None:
+            messagebox.showinfo(
+                self.tr("Abrir no Master"),
+                self.tr("Esta trama não tem um pedido de leitura FC01–FC04 com endereço "
+                        "conhecido."),
+            )
+            return None
+        port = ""
+        if not getattr(self, "capture_active", False):
+            port = self.port_a_var.get().strip()
+        return self.master_open_definition(
+            definition, port=port, baud=self.baud_var.get(),
+            parity=self.parity_var.get(), stopbits=self.stop_var.get(),
+        )
+
+    def master_open_definition(self, definition, port="", baud="", parity="", stopbits=""):
+        """Add a Master window and show the Master tab.
+
+        The serial settings (and port) are copied to the Master connection only
+        when it is not connected and they are valid for the Master.
+        """
+        if not self.master_active:
+            if str(baud) in [str(b) for b in DISCOVERY_BAUD_RATES]:
+                self.master_baud_var.set(str(baud))
+            if parity in MASTER_PARITIES:
+                self.master_parity_var.set(parity)
+            if str(stopbits) in MASTER_STOP_BITS:
+                self.master_stop_var.set(str(stopbits))
+            if port and port in tuple(self.master_port_combo["values"]):
+                self.master_port_var.set(port)
+        window = self.master_add_window(definition)
+        try:
+            self.main_notebook.select(self.master_page)
+        except tk.TclError:
+            pass
+        return window
+
+    def _master_selected_group_starts(self, window):
+        """PDU addresses where the values of the selected rows start."""
+        starts = []
+        for row in self._master_selected_rows(window.window_id):
+            offset, _size, fmt = window.group_of_row(row)
+            address = window.address + offset
+            if fmt is not None and address not in starts:
+                starts.append(address)
+        return starts
+
+    def master_edit_scale(self, window_id):
+        """Ask for a linear scale and apply it to the selected values."""
+        window = self.master_windows.get(window_id)
+        if window is None:
+            return False
+        starts = self._master_selected_group_starts(window)
+        if not starts:
+            messagebox.showwarning(self.tr("Escala"),
+                                   self.tr("Seleciona pelo menos um endereço."))
+            return False
+        current = window.scales.get(starts[0]) or {
+            "raw": [0, 65535], "eng": [0, 100], "decimals": 1, "unit": ""}
+
+        dialog, body = self._master_dialog(self.tr("Escala"))
+        ttk.Label(body, text=self.trf("Escala de {count} valor(es) selecionado(s):",
+                                      count=len(starts))).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        def number_text(value):
+            return f"{value:g}"
+
+        variables = {
+            "raw_min": tk.StringVar(value=number_text(current["raw"][0])),
+            "raw_max": tk.StringVar(value=number_text(current["raw"][1])),
+            "eng_min": tk.StringVar(value=number_text(current["eng"][0])),
+            "eng_max": tk.StringVar(value=number_text(current["eng"][1])),
+            "decimals": tk.StringVar(value=str(current["decimals"])),
+            "unit": tk.StringVar(value=current.get("unit", "")),
+        }
+        layout = (
+            (1, 0, "Bruto mín.", "raw_min"), (1, 2, "Bruto máx.", "raw_max"),
+            (2, 0, "Eng. mín.", "eng_min"), (2, 2, "Eng. máx.", "eng_max"),
+            (3, 0, "Casas decimais", "decimals"), (3, 2, "Unidade", "unit"),
+        )
+        first_entry = None
+        for row, column, caption, key in layout:
+            ttk.Label(body, text=self.tr(caption)).grid(row=row, column=column, sticky="w",
+                                                        padx=(0, 6), pady=2)
+            entry = ttk.Entry(body, width=10, textvariable=variables[key])
+            entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 14), pady=2)
+            first_entry = first_entry or entry
+        ttk.Label(body, text=self.tr("Valor = Eng. mín. + (bruto − Bruto mín.) × "
+                                     "(Eng. máx. − Eng. mín.) / (Bruto máx. − Bruto mín.)"),
+                  style="TLabel").grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 4))
+        message_var = tk.StringVar()
+        ttk.Label(body, textvariable=message_var, style="MBS.Master.Error.TLabel").grid(
+            row=5, column=0, columnspan=4, sticky="w")
+        result = {"ok": False}
+
+        def accept(_event=None):
+            try:
+                scale = validate_scale(
+                    variables["raw_min"].get(), variables["raw_max"].get(),
+                    variables["eng_min"].get(), variables["eng_max"].get(),
+                    variables["decimals"].get(), variables["unit"].get(),
+                )
+            except ValueError as exc:
+                message_var.set(self.tr(str(exc)))
+                return
+            for address in starts:
+                window.scales[address] = dict(scale)
+            self._master_render_values(window)
+            self._master_mark_changed()
+            result["ok"] = True
+            dialog.destroy()
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=6, column=0, columnspan=4, sticky="e", pady=(8, 0))
+        ttk.Button(buttons, text=self.tr("Aplicar"), command=accept,
+                   style="MBS.Primary.TButton").grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(buttons, text=self.tr("Cancelar"), command=dialog.destroy).grid(
+            row=0, column=1)
+        dialog.bind("<Return>", accept)
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        if first_entry is not None:
+            first_entry.focus_set()
+        dialog.grab_set()
+        self.wait_window(dialog)
+        return result["ok"]
+
+    def master_remove_scale(self, window_id):
+        window = self.master_windows.get(window_id)
+        if window is None:
+            return False
+        removed = False
+        for address in self._master_selected_group_starts(window):
+            removed = window.scales.pop(address, None) is not None or removed
+        if removed:
+            self._master_render_values(window)
+            self._master_mark_changed()
+        return removed
+
+    def master_copy_rows(self, window_id):
+        """Copy the selected rows (all rows if none) as tab-separated text."""
+        pane = self._master_panes.get(window_id)
+        if pane is None:
+            return
+        tree = pane["tree"]
+        rows = list(tree.selection()) or list(tree.get_children())
+        lines = ["\t".join(str(v) for v in tree.item(iid, "values")) for iid in rows]
+        if lines:
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(lines))
+
+    def master_set_base(self, window_id, base):
+        window = self.master_windows.get(window_id)
+        pane = self._master_panes.get(window_id)
+        if window is None or pane is None or window.base == base:
+            return
+        window.base = base
+        pane["address_var"].set(str(window.address + window.base))
+        self._master_fill_rows(window)
+        self._master_render_status(window)
+        self._master_update_apply_state(window_id)
+        self._master_mark_changed()
+
+    # -- closing the application ------------------------------------------------------
+    def master_confirm_close(self):
+        """Ask to save a changed workspace; False cancels closing the application.
+
+        Plain windows that were never saved as a workspace close silently.
+        """
+        if not (getattr(self, "master_current_workspace", "")
+                and getattr(self, "master_workspace_dirty", False)):
+            return True
+        answer = messagebox.askyesnocancel(
+            self.tr("Workspace"),
+            self.trf("Guardar alterações ao workspace \"{name}\"?",
+                     name=self.master_current_workspace),
+        )
+        if answer is None:
+            return False
+        if answer:
+            return self.master_save_workspace(self.master_current_workspace)
+        return True
+
     # -- language / palette / shutdown -----------------------------------------------
     def master_apply_language(self):
         if not hasattr(self, "master_windows"):
             return
+        self._master_update_workspace_label()
         for window in self.master_windows.values():
             pane = self._master_panes.get(window.window_id)
             if pane is None:
@@ -1116,7 +1934,30 @@ class MasterMixin:
         except tk.TclError:
             pass
 
+    def _master_apply_menu_palette(self):
+        menu = getattr(self, "master_workspace_menu", None)
+        if menu is None:
+            return
+        dark = bool(getattr(self, "dark_mode_var", tk.BooleanVar(value=False)).get())
+        colors = theme_colors(self, dark)
+        menus = [menu] + list(menu.winfo_children())
+        row_menu = getattr(self, "_master_row_menu", None)
+        if row_menu is not None:
+            menus += [row_menu] + list(row_menu.winfo_children())
+            for child in row_menu.winfo_children():
+                menus += list(child.winfo_children())
+        for widget in menus:
+            try:
+                widget.configure(
+                    background=colors["panel"], foreground=colors["text"],
+                    activebackground=colors["select"], activeforeground=colors["select_text"],
+                    disabledforeground=colors["disabled"],
+                )
+            except tk.TclError:
+                pass
+
     def master_apply_palette(self, dark):
+        self._master_apply_menu_palette()
         colors = theme_colors(self, dark)
         if hasattr(self, "master_canvas"):
             self.master_canvas.configure(background=colors["root"])
@@ -1128,6 +1969,7 @@ class MasterMixin:
         for pane in getattr(self, "_master_panes", {}).values():
             if pane.get("toplevel") is not None:
                 self._master_apply_toplevel_palette(pane["toplevel"])
+            self._master_configure_tree_tags(pane["tree"])
         button = getattr(self, "master_refresh_btn", None)
         if button is not None:
             button.set_dark_mode(dark)
@@ -1136,6 +1978,7 @@ class MasterMixin:
         engine = getattr(self, "master_engine", None)
         if engine is not None:
             engine.stop(join_timeout=0.8)
+            self.master_serial = engine.ser
         ser = getattr(self, "master_serial", None)
         if ser is not None:
             try:

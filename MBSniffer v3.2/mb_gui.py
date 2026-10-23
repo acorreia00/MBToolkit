@@ -29,7 +29,7 @@ from mb_protocol import SessionMetrics
 from mb_slave_finder import SlaveFinderMixin
 from mb_master_ui import MasterMixin
 from mb_capture import CaptureMixin
-from mb_view import ViewMixin
+from mb_view import TRAFFIC_MENU_OPEN_IN_MASTER, ViewMixin
 from mb_widgets import RefreshButton, ToggleSwitch
 from mb_theme import apply_modern_theme, apply_theme, theme_colors
 from mb_i18n import (
@@ -291,7 +291,7 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                 selectforeground=colors["select_text"],
             )
 
-        for menu_name in ("slave_filter_menu", "traffic_context_menu"):
+        for menu_name in ("slave_filter_menu", "traffic_context_menu", "discovery_context_menu"):
             menu = getattr(self, menu_name, None)
             if menu is None:
                 continue
@@ -475,6 +475,7 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             (4, "Filtrar por este FC"),
             (5, "Mostrar apenas esta transação"),
             (6, "Limpar filtro de transação"),
+            (TRAFFIC_MENU_OPEN_IN_MASTER, "Abrir no Master"),
         )
         for index, canonical in labels:
             try:
@@ -728,6 +729,7 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                     "stop_bits": self.master_stop_var.get(),
                     "response_timeout_ms": self.master_timeout_var.get(),
                     "delay_ms": self.master_delay_var.get(),
+                    "last_workspace": self.master_current_workspace,
                 },
             }
             save_ui_settings(settings=payload)
@@ -1667,6 +1669,11 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             label="Limpar filtro de transação",
             command=self.clear_transaction_filter,
         )
+        self.traffic_context_menu.add_separator()
+        self.traffic_context_menu.add_command(
+            label="Abrir no Master",
+            command=self.context_open_selected_in_master,
+        )
 
         ys = ttk.Scrollbar(parsed, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ys.set)
@@ -2310,8 +2317,9 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         h(
             "Cada janela lê uma zona de memória de um Slave: Slave ID, função (FC01 Coils, "
             "FC02 Discrete Inputs, FC03 Holding Registers ou FC04 Input Registers), endereço, "
-            "quantidade e scan rate. Base 0 mostra o PDU Address; Base 1 numera a partir de 1, "
-            "como em muitos manuais. As alterações só valem depois de “Aplicar”.\n"
+            "quantidade e scan rate. As alterações só valem depois de “Aplicar”, que fica "
+            "destacado a azul enquanto houver campos por aplicar. A tabela mostra até 15 "
+            "linhas; acima disso tem scroll.\n"
         )
         h(
             "Todas as janelas partilham a mesma porta COM: o Modbus RTU só admite um pedido "
@@ -2322,8 +2330,41 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         h(
             "Formatos: 16 bits com e sem sinal, hex e binário; 32 bits com e sem sinal e "
             "float, nas ordens de bytes ABCD (big-endian), CDAB (palavras trocadas), BADC "
-            "(bytes trocados) e DCBA (little-endian). Os valores de 32 bits ocupam dois "
-            "registos e aparecem na linha do primeiro.\n"
+            "(bytes trocados) e DCBA (little-endian); 64 bits com e sem sinal e double, nas "
+            "ordens ABCDEFGH, GHEFCDAB, BADCFEHG e HGFEDCBA. Os valores de 32 e 64 bits "
+            "ocupam 2 e 4 registos e aparecem na linha do primeiro.\n"
+        )
+        h(
+            "O campo “Formato” é o formato por defeito da janela. Com clique direito num ou "
+            "mais endereços (arrastar com o rato, ou Ctrl/Shift, para selecionar vários) escolhe-se o formato só "
+            "desses endereços: os de 32 bits exigem 2 registos seguidos e os de 64 bits 4 "
+            "(ou um múltiplo, aplicado em grupos). “Repor formato da janela” volta ao "
+            "formato por defeito. O mesmo menu tem “Copiar” (também Ctrl+C), que copia "
+            "endereços, nomes e valores para colar no Excel, e “Base de endereços”: 0 mostra "
+            "o PDU Address; 1 numera a partir de 1, como em muitos manuais.\n"
+        )
+        h(
+            "Quando uma leitura falha (Timeout, Exception ou resposta inválida), os valores "
+            "ficam a cinzento até voltar a haver uma leitura correta; ao desligar também.\n"
+        )
+        h(
+            "Escala: no clique direito, “Escala…” converte o valor bruto em unidades de "
+            "engenharia com dois pontos (Bruto mín./máx. → Eng. mín./máx.), com casas "
+            "decimais e unidade (por exemplo 2000–10000 → −180–180 °). Na escrita, o valor "
+            "é escrito em unidades e convertido para bruto. “Remover escala” volta ao valor "
+            "bruto. As escalas ficam guardadas no workspace.\n"
+        )
+        h(
+            "“Abrir no Master”: no Tráfego do Sniffer (clique direito num pedido FC01–FC04 "
+            "ou na resposta correspondente) e nos resultados do Bus Slave Finder (clique "
+            "direito ou duplo clique) cria uma janela do Master com o mesmo Slave, função, "
+            "endereço e quantidade, e copia os parâmetros série para a ligação do Master "
+            "(se não estiver ligado).\n"
+        )
+        h(
+            "Se a porta COM falhar durante a ligação (por exemplo, o adaptador USB foi "
+            "desligado), o Master não para: tenta voltar a abrir a porta a cada 2 s e "
+            "retoma as leituras quando a porta volta. Para parar, carregar em “Desligar”.\n"
         )
         h(
             "Escrita: duplo clique num valor de uma janela FC01 ou FC03. Coils com FC05 ou "
@@ -2333,10 +2374,23 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         )
         h(
             "Cada janela mostra Tx, erros, timeouts, o último tempo de resposta e o último "
-            "erro (Timeout, Exception ou resposta inválida). “Destacar” abre a janela à parte "
-            "do separador; “Ancorar” ou fechar essa janela devolve-a ao separador. "
-            "“Guardar workspace” grava a ligação, todas as janelas, formatos e nomes num "
-            "ficheiro .mbsw.\n"
+            "erro (Timeout, Exception ou resposta inválida). No cabeçalho de cada janela, "
+            "“Renomear” muda o nome da janela (também com duplo clique no nome), "
+            "“Destacar” abre-a à parte do separador (“Ancorar” ou fechar essa janela "
+            "devolve-a) e “✕” fecha a janela.\n"
+        )
+        h(
+            "O menu “Workspace” guarda a ligação, todas as janelas, os nomes e os formatos "
+            "com um nome à escolha, e lista os workspaces guardados para os abrir ou apagar "
+            "diretamente. Os ficheiros ficam em %APPDATA%\\MBSniffer\\Workspaces, junto das "
+            "preferências.\n"
+        )
+        h(
+            "O último workspace aberto ou guardado é reaberto ao arrancar o programa, sem "
+            "ligar ao barramento. Enquanto houver alterações por guardar, aparece "
+            "“(alterado)” ao lado do nome; ao fechar o programa nessa situação, pergunta se "
+            "quer guardar. Janelas que nunca foram guardadas num workspace fecham sem "
+            "perguntar, e fechar todas as janelas deixa de ter workspace aberto.\n"
         )
 
         h("Preferências guardadas\n", "heading")
@@ -2345,7 +2399,8 @@ class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "%APPDATA%\\MBSniffer\\settings.json. Incluem Light/Dark, último separador, "
             "parâmetros série, Frame gap, Pending timeout, Auto-scroll, Separar transações, "
             "Realçar resultados, opções do Bus Slave Finder e parâmetros de ligação do "
-            "Master. As janelas do Master guardam-se num workspace (.mbsw).\n"
+            "Master. As janelas do Master guardam-se em workspaces, na pasta "
+            "%APPDATA%\\MBSniffer\\Workspaces.\n"
         )
         h(
             "As portas COM não são guardadas porque são específicas de cada computador. "
