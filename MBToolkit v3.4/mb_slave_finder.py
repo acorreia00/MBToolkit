@@ -1,0 +1,1625 @@
+#!/usr/bin/env python3
+"""Active Modbus RTU Bus Slave Finder logic and GUI mixin."""
+
+import threading
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+from mb_config import (
+    DISCOVERY_BAUD_RATES,
+    DISCOVERY_PARITIES,
+    DISCOVERY_STOP_BITS,
+    DISCOVERY_DEFAULT_MIN_TIMEOUT_MS,
+    DISCOVERY_MIN_TIMEOUT_MS,
+    DISCOVERY_MAX_TIMEOUT_MS,
+    DISCOVERY_PROBE_ADDRESS,
+    DISCOVERY_PROBE_QTY,
+    DISCOVERY_WRITE_TIMEOUT_SECONDS,
+    DISCOVERY_WRITE_RETRIES,
+    DISCOVERY_RX_BUFFER_LIMIT,
+    DISCOVERY_MIN_ATTEMPTS,
+    DISCOVERY_MAX_ATTEMPTS,
+    DISCOVERY_DEFAULT_ATTEMPTS,
+    DISCOVERY_IDLE_CHECK_SECONDS,
+    MODBUS_EXCEPTION_CODES,
+)
+from mb_protocol import (
+    append_crc,
+    crc_ok,
+    hex_bytes,
+    modbus_rtu_interframe_gap_seconds,
+)
+from mb_widgets import RefreshButton
+
+def build_discovery_probe(slave: int, fc: int) -> bytes:
+    """Build a read-only discovery probe: FC03/FC04, Address 0, Qty 1."""
+    if not (1 <= int(slave) <= 247):
+        raise ValueError("Slave ID fora do intervalo 1..247")
+    if int(fc) not in (3, 4):
+        raise ValueError("A descoberta ativa suporta apenas FC03/FC04")
+
+    payload = bytes((
+        int(slave),
+        int(fc),
+        0x00, DISCOVERY_PROBE_ADDRESS & 0xFF,
+        0x00, DISCOVERY_PROBE_QTY & 0xFF,
+    ))
+    return append_crc(payload)
+
+DEVICE_ID_FC = 0x2B
+DEVICE_ID_MEI_TYPE = 0x0E
+DEVICE_ID_READ_BASIC = 0x01
+DEVICE_ID_MORE_FOLLOWS = 0xFF
+DEVICE_ID_BASIC_OBJECTS = (0x00, 0x01, 0x02)
+DEVICE_ID_MAX_PAGES = 8
+
+def build_device_identification_probe(slave: int, object_id: int = 0x00) -> bytes:
+    """Build FC43/MEI 14 Basic Device Identification request."""
+    slave = int(slave)
+    object_id = int(object_id)
+    if not (1 <= slave <= 247):
+        raise ValueError("Slave ID fora do intervalo 1..247")
+    if not (0 <= object_id <= 0xFF):
+        raise ValueError("Object ID fora do intervalo 0..255")
+    return append_crc(bytes((
+        slave,
+        DEVICE_ID_FC,
+        DEVICE_ID_MEI_TYPE,
+        DEVICE_ID_READ_BASIC,
+        object_id,
+    )))
+
+def _decode_device_id_value(value: bytes) -> str:
+    """Decode a Modbus Device Identification ASCII object for display."""
+    return bytes(value).decode("ascii", errors="replace").strip("\x00 ")
+
+def find_device_identification_response(buffer: bytes, slave: int):
+    """Find one CRC-valid FC43/14 response or Modbus exception in *buffer*."""
+    data = bytes(buffer)
+    slave = int(slave)
+
+    for offset in range(max(0, len(data) - 3)):
+        if data[offset] != slave or offset + 2 > len(data):
+            continue
+
+        response_fc = data[offset + 1]
+
+        # FC43 exception response: Slave + 0xAB + Exception + CRC.
+        if response_fc == (DEVICE_ID_FC | 0x80):
+            end = offset + 5
+            if end <= len(data):
+                frame = data[offset:end]
+                if crc_ok(frame):
+                    return {
+                        "kind": "EXCEPTION",
+                        "frame": frame,
+                        "exception_code": frame[2],
+                        "objects": {},
+                        "more_follows": False,
+                        "next_object_id": 0,
+                    }
+            continue
+
+        if response_fc != DEVICE_ID_FC:
+            continue
+
+        # Normal response fixed header before the object list:
+        # Slave, FC, MEI, ReadCode, Conformity, MoreFollows, NextObject, Count.
+        if offset + 8 > len(data):
+            continue
+        if data[offset + 2] != DEVICE_ID_MEI_TYPE:
+            continue
+        if data[offset + 3] != DEVICE_ID_READ_BASIC:
+            continue
+
+        more_follows = data[offset + 5] == DEVICE_ID_MORE_FOLLOWS
+        next_object_id = data[offset + 6]
+        object_count = data[offset + 7]
+        pos = offset + 8
+        objects = {}
+        complete = True
+
+        for _ in range(object_count):
+            if pos + 2 > len(data):
+                complete = False
+                break
+            object_id = data[pos]
+            object_len = data[pos + 1]
+            pos += 2
+            if pos + object_len > len(data):
+                complete = False
+                break
+            objects[object_id] = _decode_device_id_value(
+                data[pos:pos + object_len]
+            )
+            pos += object_len
+
+        if not complete:
+            continue
+
+        end = pos + 2
+        if end > len(data):
+            continue
+        frame = data[offset:end]
+        if not crc_ok(frame):
+            continue
+
+        return {
+            "kind": "DEVICE_ID",
+            "frame": frame,
+            "exception_code": None,
+            "objects": objects,
+            "more_follows": more_follows,
+            "next_object_id": next_object_id,
+            "conformity_level": data[offset + 4],
+        }
+
+    return None
+
+def read_device_identification_response(ser, slave, timeout_s, stop_event):
+    """Read until a valid FC43/14 response/exception is received or timed out."""
+    deadline = time.perf_counter() + max(0.001, float(timeout_s))
+    buffer = bytearray()
+
+    while time.perf_counter() < deadline:
+        if stop_event.is_set():
+            return None
+
+        waiting = int(getattr(ser, "in_waiting", 0) or 0)
+        if waiting:
+            chunk = ser.read(waiting)
+            if chunk:
+                buffer.extend(chunk)
+                if len(buffer) > DISCOVERY_RX_BUFFER_LIMIT:
+                    del buffer[:-DISCOVERY_RX_BUFFER_LIMIT]
+                found = find_device_identification_response(buffer, slave)
+                if found is not None:
+                    return found
+        elif stop_event.wait(0.001):
+            return None
+
+    return find_device_identification_response(buffer, slave)
+
+def device_identification_timeout_seconds(
+    baud: int,
+    parity: str,
+    stopbits: str,
+    minimum_timeout_ms: float = DISCOVERY_DEFAULT_MIN_TIMEOUT_MS,
+) -> float:
+    """Conservative timeout for one FC43/14 response, up to one RTU frame."""
+    baud = max(1, int(baud))
+    bits_per_char = discovery_bits_per_char(parity, stopbits)
+    char_s = bits_per_char / float(baud)
+    # A Modbus RTU ADU is at most 256 bytes. Allow one full response frame,
+    # the recommended t3.5 gap and a small device-processing margin.
+    calculated = (
+        256.0 * char_s
+        + modbus_rtu_interframe_gap_seconds(baud, bits_per_char)
+        + 0.020
+    )
+    return max(float(minimum_timeout_ms) / 1000.0, calculated)
+
+def device_identification_request_transmit_seconds(
+    baud: int, parity: str, stopbits: str
+) -> float:
+    """Estimated on-wire duration of the 7-byte FC43/14 request."""
+    return 7.0 * discovery_bits_per_char(parity, stopbits) / float(max(1, int(baud)))
+
+def format_device_identification(result) -> str:
+    """Return compact Device Identification text for the Finder result table."""
+    if result is None:
+        return "No response"
+    if result.get("kind") == "EXCEPTION":
+        code = int(result.get("exception_code", 0))
+        name = MODBUS_EXCEPTION_CODES.get(
+            code, ("Unknown/Reserved Exception", "")
+        )[0]
+        return f"Exception 0x{code:02X} — {name}"
+
+    objects = result.get("objects", {}) or {}
+    values = [objects.get(obj_id, "") for obj_id in DEVICE_ID_BASIC_OBJECTS]
+    if any(values):
+        return " | ".join(value or "—" for value in values)
+    return "Response — no Basic Device Identification objects"
+
+def read_basic_device_identification(
+    ser, slave, baud, parity, stopbits, minimum_timeout_ms, stop_event, serial_module
+):
+    """Read Basic Device Identification, following More Follows when required."""
+    object_id = 0x00
+    merged_objects = {}
+    frames = []
+    conformity_level = None
+
+    for _page in range(DEVICE_ID_MAX_PAGES):
+        if stop_event.is_set():
+            return None
+
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            raise
+
+        request = build_device_identification_probe(slave, object_id)
+        sent = write_discovery_request(
+            ser, request, baud, parity, stopbits, stop_event, serial_module
+        )
+        if not sent or stop_event.is_set():
+            return None
+
+        result = read_device_identification_response(
+            ser,
+            slave,
+            device_identification_timeout_seconds(
+                baud, parity, stopbits, minimum_timeout_ms
+            ),
+            stop_event,
+        )
+        if result is None or result.get("kind") == "EXCEPTION":
+            return result
+
+        frames.append(result["frame"])
+        merged_objects.update(result.get("objects", {}))
+        conformity_level = result.get("conformity_level")
+
+        # Basic identification is complete as soon as VendorName, ProductCode
+        # and MajorMinorRevision have all been received.
+        if all(obj_id in merged_objects for obj_id in DEVICE_ID_BASIC_OBJECTS):
+            return {
+                "kind": "DEVICE_ID",
+                "frame": b"".join(frames),
+                "exception_code": None,
+                "objects": merged_objects,
+                "more_follows": bool(result.get("more_follows")),
+                "next_object_id": int(result.get("next_object_id", 0)),
+                "conformity_level": conformity_level,
+            }
+
+        if not result.get("more_follows"):
+            break
+
+        next_object_id = int(result.get("next_object_id", 0))
+        if next_object_id == object_id:
+            break
+        object_id = next_object_id
+
+        gap_s = modbus_rtu_interframe_gap_seconds(
+            baud, discovery_bits_per_char(parity, stopbits)
+        )
+        if stop_event.wait(gap_s):
+            return None
+
+    return {
+        "kind": "DEVICE_ID",
+        "frame": b"".join(frames),
+        "exception_code": None,
+        "objects": merged_objects,
+        "more_follows": False,
+        "next_object_id": object_id,
+        "conformity_level": conformity_level,
+    } if frames else None
+
+def discovery_bits_per_char(parity: str, stopbits: str) -> float:
+    """Return serial bits/character: start + 8 data + parity + stop."""
+    parity_bits = 0 if parity == "None" else 1
+    stop_value = float(stopbits)
+    return 1.0 + 8.0 + parity_bits + stop_value
+
+def discovery_response_timeout_seconds(
+    baud: int,
+    parity: str,
+    stopbits: str,
+    minimum_timeout_ms: float = DISCOVERY_DEFAULT_MIN_TIMEOUT_MS,
+) -> float:
+    """
+    Adaptive response deadline after the request has left the serial driver.
+
+    The deadline includes the on-wire duration of a normal 7-byte FC03/FC04
+    response plus processing/inter-frame margin, with a user-configurable
+    minimum.
+    """
+    baud = max(1, int(baud))
+    bits_per_char = discovery_bits_per_char(parity, stopbits)
+    char_s = bits_per_char / float(baud)
+    normal_response_s = 7.0 * char_s
+    serial_margin_s = max(
+        0.012, modbus_rtu_interframe_gap_seconds(baud, bits_per_char)
+    )
+    calculated = normal_response_s + serial_margin_s
+    return max(float(minimum_timeout_ms) / 1000.0, calculated)
+
+def discovery_request_transmit_seconds(baud: int, parity: str, stopbits: str) -> float:
+    """Estimated on-wire duration of the fixed 8-byte discovery request."""
+    return 8.0 * discovery_bits_per_char(parity, stopbits) / float(max(1, int(baud)))
+
+def find_discovery_response(buffer: bytes, slave: int, fc: int):
+    """
+    Find a valid normal or exception response for one discovery probe.
+
+    Any CRC-valid Modbus exception counts as proof that the slave exists.
+    The scanner intentionally ignores other traffic and request echoes.
+    """
+    data = bytes(buffer)
+    slave = int(slave)
+    fc = int(fc)
+
+    for offset in range(max(0, len(data) - 3)):
+        if data[offset] != slave or offset + 2 > len(data):
+            continue
+
+        response_fc = data[offset + 1]
+
+        if response_fc == (fc | 0x80):
+            end = offset + 5
+            if end <= len(data):
+                frame = data[offset:end]
+                if crc_ok(frame):
+                    code = frame[2]
+                    return {
+                        "kind": "EXCEPTION",
+                        "frame": frame,
+                        "exception_code": code,
+                    }
+
+        if response_fc == fc and offset + 3 <= len(data):
+            byte_count = data[offset + 2]
+            # FC03/04 register responses must contain an even positive byte count.
+            if byte_count > 0 and byte_count % 2 == 0 and byte_count <= 250:
+                end = offset + 5 + byte_count
+                if end <= len(data):
+                    frame = data[offset:end]
+                    if crc_ok(frame):
+                        return {
+                            "kind": "RESPONSE",
+                            "frame": frame,
+                            "exception_code": None,
+                        }
+
+    return None
+
+def read_discovery_response(ser, slave, fc, timeout_s, stop_event):
+    """Read non-blocking serial bytes until a valid probe response or timeout."""
+    deadline = time.perf_counter() + max(0.001, float(timeout_s))
+    buffer = bytearray()
+
+    while time.perf_counter() < deadline:
+        if stop_event.is_set():
+            return None
+
+        # Do not hide serial-driver failures as ordinary slave timeouts.
+        waiting = int(getattr(ser, "in_waiting", 0) or 0)
+
+        if waiting:
+            chunk = ser.read(waiting)
+            if chunk:
+                buffer.extend(chunk)
+                if len(buffer) > DISCOVERY_RX_BUFFER_LIMIT:
+                    del buffer[:-DISCOVERY_RX_BUFFER_LIMIT]
+                found = find_discovery_response(buffer, slave, fc)
+                if found is not None:
+                    return found
+        else:
+            # Event.wait() keeps the Stop button responsive.
+            if stop_event.wait(0.001):
+                return None
+
+    return find_discovery_response(buffer, slave, fc)
+
+def bus_activity_detected(ser, listen_s, stop_event):
+    """Listen passively for *listen_s* seconds; return the bytes received.
+
+    Any byte, even one framed at another baud rate, means something else is
+    transmitting, so the active scan must not start.
+    """
+    deadline = time.perf_counter() + max(0.0, float(listen_s))
+    received = bytearray()
+    while time.perf_counter() < deadline:
+        if stop_event.is_set():
+            break
+        waiting = int(getattr(ser, "in_waiting", 0) or 0)
+        if waiting:
+            received.extend(ser.read(waiting) or b"")
+            if received:
+                break
+        elif stop_event.wait(0.005):
+            break
+    return bytes(received)
+
+
+def cancel_serial_io(ser):
+    """Best-effort cancellation of pending serial I/O."""
+    if ser is None:
+        return
+    for method_name in ("cancel_read", "cancel_write"):
+        method = getattr(ser, method_name, None)
+        if callable(method):
+            try:
+                method()
+            except Exception:
+                pass
+
+def recover_discovery_write(ser):
+    """Best-effort cleanup after a discovery write timeout."""
+    cancel = getattr(ser, "cancel_write", None)
+    if callable(cancel):
+        try:
+            cancel()
+        except Exception:
+            pass
+    try:
+        ser.reset_output_buffer()
+    except Exception:
+        pass
+    try:
+        ser.reset_input_buffer()
+    except Exception:
+        pass
+
+def write_discovery_request(
+    ser, request, baud, parity, stopbits, stop_event, serial_module
+):
+    """
+    Transmit one discovery request robustly.
+
+    A write timeout is retried once after cancelling/clearing TX. ser.flush()
+    is deliberately avoided because some USB-serial drivers can block there.
+    The helper also waits for the request's estimated physical on-wire time so
+    the slave response timeout starts at a sensible point on slow baud rates.
+    """
+    request = bytes(request)
+    timeout_exc = getattr(serial_module, "SerialTimeoutException", TimeoutError)
+    serial_exc = getattr(serial_module, "SerialException", OSError)
+    attempts = DISCOVERY_WRITE_RETRIES + 1
+    last_error = None
+    bits_per_char = discovery_bits_per_char(parity, stopbits)
+    char_time_s = bits_per_char / float(max(1, int(baud)))
+    request_wire_s = len(request) * char_time_s
+    retry_silence_s = max(
+        0.050,
+        request_wire_s + modbus_rtu_interframe_gap_seconds(baud, bits_per_char),
+    )
+
+    for attempt in range(attempts):
+        if stop_event.is_set():
+            return False
+
+        started_write = time.perf_counter()
+        try:
+            written_total = 0
+            while written_total < len(request):
+                if stop_event.is_set():
+                    return False
+                written = ser.write(request[written_total:])
+                written = 0 if written is None else int(written)
+                if written <= 0:
+                    raise timeout_exc(
+                        "A porta série não aceitou bytes para transmissão."
+                    )
+                written_total += written
+
+            elapsed_write_s = time.perf_counter() - started_write
+            remaining_wire_s = max(0.0, request_wire_s - elapsed_write_s)
+            if remaining_wire_s > 0 and stop_event.wait(remaining_wire_s):
+                return False
+            return True
+
+        except timeout_exc as exc:
+            last_error = exc
+            recover_discovery_write(ser)
+            if attempt + 1 >= attempts or stop_event.is_set():
+                raise
+            # If any fragment reached the wire before the driver timed out,
+            # leave enough silence for that fragment to finish and for a full
+            # Modbus RTU frame gap before retrying.
+            if stop_event.wait(retry_silence_s):
+                return False
+
+        except serial_exc:
+            raise
+
+    if last_error is not None:
+        raise last_error
+    return False
+
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+class SlaveFinderMixin:
+    """Methods that implement the active Bus Slave Finder tab."""
+
+    def build_discovery_tab(self, page):
+        """Build the full-window active Modbus RTU slave-discovery workspace."""
+        finder_saved = getattr(self, "ui_settings", {}).get(
+            "bus_slave_finder", {}
+        )
+        if not isinstance(finder_saved, dict):
+            finder_saved = {}
+
+        saved_bauds = set(
+            finder_saved.get("baud_rates", [9600, 19200])
+        )
+        saved_parities = set(
+            finder_saved.get("parities", ["None", "Even"])
+        )
+        saved_stops = set(
+            finder_saved.get("stop_bits", ["1"])
+        )
+
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(3, weight=1)
+
+        warning = ttk.LabelFrame(page, text="Pesquisa ativa — transmite no barramento")
+        warning.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        warning.columnconfigure(0, weight=1)
+        ttk.Label(
+            warning,
+            text=(
+                "Esta ferramenta atua temporariamente como master Modbus RTU e envia apenas "
+                "pedidos de leitura. Não a utilizes com outro master ativo no mesmo barramento."
+            ),
+            wraplength=1100,
+        ).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+
+        self.discovery_safety_var = tk.BooleanVar(value=False)
+        safety_cb = ttk.Checkbutton(
+            warning,
+            text="Confirmo que não existe outro master ativo no barramento.",
+            variable=self.discovery_safety_var,
+            command=self.update_discovery_start_state,
+        )
+        safety_cb.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+
+        options = ttk.LabelFrame(page, text="Configuração da pesquisa")
+        self._discovery_options_frame = options
+        options.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
+        options.columnconfigure(0, weight=1)
+
+        top_row = ttk.Frame(options)
+        top_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        top_row.columnconfigure(3, weight=1)
+
+        ttk.Label(top_row, text="Porta COM").grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self.discovery_port_var = tk.StringVar()
+        self.discovery_port_combo = ttk.Combobox(
+            top_row,
+            textvariable=self.discovery_port_var,
+            width=13,
+            state="readonly",
+        )
+        self.discovery_port_combo.grid(
+            row=0, column=1, sticky="w", padx=(0, 0)
+        )
+        self.discovery_port_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self.update_discovery_start_state(),
+        )
+
+        self.discovery_refresh_btn = RefreshButton(
+            top_row,
+            command=self.refresh_ports,
+            size=24,
+        )
+        self.discovery_refresh_btn.grid(
+            row=0, column=2, sticky="w", padx=(4, 0)
+        )
+
+        def _sync_discovery_refresh_square(_event=None):
+            height = self.discovery_port_combo.winfo_height()
+            if height > 1:
+                self.discovery_refresh_btn.configure(
+                    width=height, height=height
+                )
+
+        self.discovery_port_combo.bind(
+            "<Configure>", _sync_discovery_refresh_square, add="+"
+        )
+
+        ttk.Label(
+            top_row,
+            text="Data bits: 8 (fixo)",
+        ).grid(row=0, column=4, sticky="w", padx=(28, 20))
+        ttk.Label(
+            top_row,
+            text="Probe: FC03 / Address 0 / Qty 1",
+        ).grid(row=0, column=5, sticky="w")
+
+        ttk.Label(top_row, text="Tentativas").grid(
+            row=0, column=6, sticky="w", padx=(28, 4)
+        )
+        self.discovery_attempts_var = tk.StringVar(
+            value=finder_saved.get("attempts", str(DISCOVERY_DEFAULT_ATTEMPTS))
+        )
+        self.discovery_attempts_spin = ttk.Spinbox(
+            top_row,
+            from_=DISCOVERY_MIN_ATTEMPTS,
+            to=DISCOVERY_MAX_ATTEMPTS,
+            increment=1,
+            width=4,
+            textvariable=self.discovery_attempts_var,
+        )
+        self.discovery_attempts_spin.grid(row=0, column=7, sticky="w")
+
+        # Baud-rate checkboxes. Defaults keep a normal industrial scan quick.
+        baud_frame = ttk.LabelFrame(options, text="Baud rate")
+        baud_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        baud_frame.rowconfigure(0, weight=1)
+        self.discovery_baud_vars = {}
+        for idx in range(len(DISCOVERY_BAUD_RATES)):
+            baud_frame.columnconfigure(idx, weight=1, uniform="baud")
+        for idx, baud in enumerate(DISCOVERY_BAUD_RATES):
+            var = tk.BooleanVar(value=baud in saved_bauds)
+            self.discovery_baud_vars[baud] = var
+            cb = ttk.Checkbutton(baud_frame, text=str(baud), variable=var)
+            cb.grid(row=0, column=idx, sticky="", padx=4, pady=(8, 7))
+            var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
+
+        serial_frame = ttk.Frame(options)
+        serial_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+        # Equal thirds independent of translated child captions.
+        for column in range(3):
+            serial_frame.columnconfigure(
+                column, weight=1, uniform="finder_serial_columns"
+            )
+
+        parity_box = ttk.LabelFrame(serial_frame, text="Parity")
+        parity_box.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        parity_box.rowconfigure(0, weight=1)
+        for idx in range(len(DISCOVERY_PARITIES)):
+            parity_box.columnconfigure(idx, weight=1, uniform="parity")
+        self.discovery_parity_vars = {}
+        for idx, parity in enumerate(DISCOVERY_PARITIES):
+            var = tk.BooleanVar(value=parity in saved_parities)
+            self.discovery_parity_vars[parity] = var
+            ttk.Checkbutton(parity_box, text=parity, variable=var).grid(
+                row=0, column=idx, sticky="", padx=4, pady=(8, 7)
+            )
+            var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
+        stop_box = ttk.LabelFrame(serial_frame, text="Stop bits")
+        stop_box.grid(row=0, column=1, sticky="nsew", padx=5)
+        stop_box.rowconfigure(0, weight=1)
+        for idx in range(len(DISCOVERY_STOP_BITS)):
+            stop_box.columnconfigure(idx, weight=1, uniform="stop")
+        self.discovery_stop_vars = {}
+        for idx, stopbits in enumerate(DISCOVERY_STOP_BITS):
+            var = tk.BooleanVar(value=stopbits in saved_stops)
+            self.discovery_stop_vars[stopbits] = var
+            ttk.Checkbutton(stop_box, text=stopbits, variable=var).grid(
+                row=0, column=idx, sticky="", padx=4, pady=(8, 7)
+            )
+            var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
+        range_box = ttk.LabelFrame(serial_frame, text="Slave IDs / velocidade")
+        range_box.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
+        range_box.columnconfigure(0, weight=1)
+        range_box.rowconfigure(0, weight=1)
+
+        # Keep the range and timeout controls on one centred line so this
+        # LabelFrame stays as compact as the neighbouring Parity/Stop bits
+        # boxes.  The option checkboxes keep their own second line so the long
+        # Device Identification caption remains fully inside the rectangle.
+        range_content = ttk.Frame(range_box)
+        range_content.grid(
+            row=0, column=0, sticky="nsew", padx=8, pady=(8, 7)
+        )
+        range_content.columnconfigure(0, weight=1)
+        for row in range(2):
+            range_content.rowconfigure(row, weight=1, uniform="range_rows")
+
+        id_row = ttk.Frame(range_content)
+        id_row.grid(row=0, column=0, sticky="")
+        ttk.Label(id_row, text="De").grid(row=0, column=0, padx=(0, 3))
+        self.discovery_slave_start_var = tk.StringVar(value=finder_saved.get("slave_start", "1"))
+        self.discovery_slave_start_spin = ttk.Spinbox(
+            id_row, from_=1, to=247, width=5, textvariable=self.discovery_slave_start_var
+        )
+        self.discovery_slave_start_spin.grid(row=0, column=1, padx=3)
+        ttk.Label(id_row, text="até").grid(row=0, column=2, padx=3)
+        self.discovery_slave_end_var = tk.StringVar(value=finder_saved.get("slave_end", "247"))
+        self.discovery_slave_end_spin = ttk.Spinbox(
+            id_row, from_=1, to=247, width=5, textvariable=self.discovery_slave_end_var
+        )
+        self.discovery_slave_end_spin.grid(row=0, column=3, padx=3)
+
+        ttk.Label(id_row, text="Timeout mín.").grid(
+            row=0, column=4, padx=(14, 3)
+        )
+        self.discovery_min_timeout_var = tk.StringVar(
+            value=finder_saved.get(
+                "min_timeout_ms",
+                str(DISCOVERY_DEFAULT_MIN_TIMEOUT_MS),
+            )
+        )
+        self.discovery_min_timeout_spin = ttk.Spinbox(
+            id_row,
+            from_=DISCOVERY_MIN_TIMEOUT_MS,
+            to=DISCOVERY_MAX_TIMEOUT_MS,
+            increment=5,
+            width=6,
+            textvariable=self.discovery_min_timeout_var,
+        )
+        self.discovery_min_timeout_spin.grid(row=0, column=5, padx=3)
+        ttk.Label(id_row, text="ms").grid(row=0, column=6, padx=3)
+
+        toggles = ttk.Frame(range_content)
+        # Small vertical separation from the Slave range/timeout row.
+        # Keep this deliberately modest so the panel remains compact.
+        toggles.grid(row=1, column=0, sticky="", pady=(3, 0))
+
+        self.discovery_fc04_fallback_var = tk.BooleanVar(value=finder_saved.get("fc04_fallback", False))
+        fallback_cb = ttk.Checkbutton(
+            toggles,
+            text="FC04 fallback",
+            variable=self.discovery_fc04_fallback_var,
+        )
+        fallback_cb.grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+        self.discovery_device_identification_var = tk.BooleanVar(
+            value=finder_saved.get("device_identification", False)
+        )
+        device_id_cb = ttk.Checkbutton(
+            toggles,
+            text="Device Identification (FC43/14)",
+            variable=self.discovery_device_identification_var,
+        )
+        device_id_cb.grid(row=0, column=1, sticky="w")
+
+        for var in (
+            self.discovery_slave_start_var,
+            self.discovery_slave_end_var,
+            self.discovery_min_timeout_var,
+            self.discovery_attempts_var,
+            self.discovery_fc04_fallback_var,
+            self.discovery_device_identification_var,
+        ):
+            var.trace_add("write", lambda *_a: self.on_discovery_options_changed())
+
+        ttk.Label(
+            options,
+            text=(
+                "FC03 é o modo rápido. Uma resposta normal OU uma Modbus Exception com CRC válido "
+                "conta como slave encontrado. Ativa FC04 fallback apenas para dispositivos que "
+                "possam ignorar FC03 sem devolver Exception. Device Identification envia FC43/14 "
+                "apenas aos slaves encontrados e tenta ler VendorName, ProductCode e Revision. "
+                "Tentativas repete cada pedido sem resposta. Antes de transmitir, a pesquisa escuta "
+                "o barramento durante 1 s e não arranca se detetar tráfego."
+            ),
+            wraplength=1120,
+        ).grid(row=3, column=0, sticky="w", padx=10, pady=(4, 8))
+
+        controls = ttk.LabelFrame(page, text="Pesquisa")
+        controls.grid(row=2, column=0, sticky="ew", padx=12, pady=6)
+        controls.columnconfigure(4, weight=1)
+
+        self.discovery_start_btn = ttk.Button(
+            controls, text="Iniciar pesquisa", command=self.start_discovery_scan
+        )
+        self.discovery_start_btn.grid(row=0, column=0, padx=(10, 5), pady=8)
+        self.discovery_stop_btn = ttk.Button(
+            controls, text="Parar", command=self.stop_discovery_scan, state="disabled"
+        )
+        self.discovery_stop_btn.grid(row=0, column=1, padx=5, pady=8)
+        self.discovery_clear_btn = ttk.Button(
+            controls, text="Limpar resultados", command=self.clear_discovery_results
+        )
+        self.discovery_clear_btn.grid(row=0, column=2, padx=5, pady=8)
+
+        self.discovery_found_var = tk.StringVar(value="Encontrados: 0")
+        ttk.Label(controls, textvariable=self.discovery_found_var).grid(
+            row=0, column=3, padx=(18, 8), pady=8, sticky="w"
+        )
+
+        self.discovery_status_var = tk.StringVar(value="Parado")
+        ttk.Label(controls, textvariable=self.discovery_status_var).grid(
+            row=0, column=4, padx=8, pady=8, sticky="w"
+        )
+
+        self.discovery_progress_var = tk.DoubleVar(value=0.0)
+        self.discovery_progress = ttk.Progressbar(
+            controls, variable=self.discovery_progress_var, maximum=100.0
+        )
+        self.discovery_progress.grid(
+            row=1, column=0, columnspan=5, sticky="ew", padx=10, pady=(0, 5)
+        )
+
+        self.discovery_progress_text_var = tk.StringVar(value="0 / 0")
+        self.discovery_estimate_var = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=self.discovery_progress_text_var).grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8)
+        )
+        ttk.Label(controls, textvariable=self.discovery_estimate_var).grid(
+            row=2, column=2, columnspan=3, sticky="e", padx=10, pady=(0, 8)
+        )
+
+        results = ttk.LabelFrame(page, text="Slaves encontrados")
+        results.grid(row=3, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        results.columnconfigure(0, weight=1)
+        results.rowconfigure(0, weight=1)
+
+        columns = (
+            "slave", "baud", "config", "fc", "result", "resp", "device_id", "raw"
+        )
+        self.discovery_tree = ttk.Treeview(
+            results, columns=columns, show="headings", selectmode="browse"
+        )
+        headings = {
+            "slave": "Slave",
+            "baud": "Baud",
+            "config": "Config.",
+            "fc": "FC",
+            "result": "Resultado",
+            "resp": "Resp. (ms)",
+            "device_id": "Device Identification",
+            "raw": "Raw Hex",
+        }
+        # Match the Traffic table behaviour: no horizontal scrollbar. Keep
+        # short fields compact and let the three text-heavy columns share the
+        # remaining viewport width. Column widths are recalculated whenever
+        # the Treeview is resized so the complete table remains visible.
+        self.discovery_fixed_widths = {
+            "slave": 70,
+            "baud": 90,
+            "config": 85,
+            "fc": 55,
+            "resp": 95,
+        }
+        self.discovery_flex_columns = ("result", "device_id", "raw")
+        self.discovery_flex_weights = {
+            "result": 0.27,
+            "device_id": 0.38,
+            "raw": 0.35,
+        }
+        self.discovery_flex_min_width = 90
+
+        initial_widths = {
+            **self.discovery_fixed_widths,
+            "result": 220,
+            "device_id": 330,
+            "raw": 300,
+        }
+        for col in columns:
+            self.discovery_tree.heading(col, text=headings[col], anchor="center")
+            self.discovery_tree.column(
+                col,
+                width=initial_widths[col],
+                minwidth=(
+                    self.discovery_flex_min_width
+                    if col in self.discovery_flex_columns
+                    else self.discovery_fixed_widths[col]
+                ),
+                anchor="w" if col in self.discovery_flex_columns else "center",
+                stretch=False,
+            )
+
+        discovery_y = ttk.Scrollbar(
+            results, orient="vertical", command=self.discovery_tree.yview
+        )
+        self.discovery_tree.configure(yscrollcommand=discovery_y.set)
+        self.discovery_tree.grid(row=0, column=0, sticky="nsew")
+        discovery_y.grid(row=0, column=1, sticky="ns")
+        self.discovery_tree.bind(
+            "<Configure>", self.fit_discovery_columns_to_viewport, add="+"
+        )
+        # Right-click / double-click a found Slave to read it in the Master tab.
+        self.discovery_context_menu = tk.Menu(self, tearoff=False)
+        self.discovery_context_menu.add_command(
+            label="Abrir no Master", command=self.discovery_open_selected_in_master
+        )
+        self.discovery_tree.bind("<Button-3>", self._show_discovery_context_menu)
+        self.discovery_tree.bind(
+            "<Double-1>", lambda _e: self.discovery_open_selected_in_master()
+        )
+
+        self.update_discovery_estimate()
+        self.update_discovery_start_state()
+
+    def _show_discovery_context_menu(self, event):
+        row = self.discovery_tree.identify_row(event.y)
+        if not row:
+            return
+        self.discovery_tree.selection_set(row)
+        try:
+            self.discovery_context_menu.entryconfigure(0, label=self.tr("Abrir no Master"))
+            self.discovery_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.discovery_context_menu.grab_release()
+
+    def discovery_open_selected_in_master(self):
+        """Open the selected found Slave in a new Master window."""
+        selection = self.discovery_tree.selection()
+        if not selection:
+            return
+        values = self.discovery_tree.item(selection[0], "values")
+        try:
+            slave, baud, config, fc = int(values[0]), str(values[1]), str(values[2]), int(values[3])
+        except (IndexError, ValueError):
+            return
+        parity = {"N": "None", "E": "Even", "O": "Odd"}.get(config[1:2], "None")
+        stopbits = config[2:] or "1"
+        self.master_open_definition(
+            {"slave": slave, "fc": fc, "address": 0, "qty": 10},
+            port=self.discovery_port_var.get().strip(),
+            baud=baud, parity=parity, stopbits=stopbits,
+        )
+
+    def fit_discovery_columns_to_viewport(self, _event=None):
+        """Fit Slave Finder columns to the visible Treeview width."""
+        if not hasattr(self, "discovery_tree"):
+            return
+
+        viewport_width = int(self.discovery_tree.winfo_width())
+        if viewport_width <= 1:
+            return
+
+        # Reserve a few pixels for Treeview borders so Tk never needs a hidden
+        # horizontal overflow area. The vertical scrollbar is a sibling and is
+        # therefore already excluded from winfo_width().
+        usable_width = max(1, viewport_width - 4)
+        fixed_total = sum(self.discovery_fixed_widths.values())
+        flex_count = len(self.discovery_flex_columns)
+        min_flex_total = self.discovery_flex_min_width * flex_count
+
+        flex_total = max(min_flex_total, usable_width - fixed_total)
+        allocated = 0
+        for index, col in enumerate(self.discovery_flex_columns):
+            if index == flex_count - 1:
+                width = flex_total - allocated
+            else:
+                width = int(round(flex_total * self.discovery_flex_weights[col]))
+                allocated += width
+            width = max(self.discovery_flex_min_width, width)
+            self.discovery_tree.column(col, width=width)
+
+        for col, width in self.discovery_fixed_widths.items():
+            self.discovery_tree.column(col, width=width)
+
+    def on_discovery_options_changed(self):
+        if hasattr(self, "discovery_estimate_var"):
+            self.update_discovery_estimate()
+            self.update_discovery_start_state()
+
+    def selected_discovery_configs(self):
+        bauds = [baud for baud in DISCOVERY_BAUD_RATES if self.discovery_baud_vars[baud].get()]
+        parities = [p for p in DISCOVERY_PARITIES if self.discovery_parity_vars[p].get()]
+        stops = [s for s in DISCOVERY_STOP_BITS if self.discovery_stop_vars[s].get()]
+        return [
+            (baud, parity, stopbits)
+            for baud in bauds
+            for parity in parities
+            for stopbits in stops
+        ]
+
+    def selected_discovery_slaves(self):
+        start = int(self.discovery_slave_start_var.get())
+        end = int(self.discovery_slave_end_var.get())
+        if not (1 <= start <= 247 and 1 <= end <= 247):
+            raise ValueError(self.tr("Os Slave IDs têm de estar entre 1 e 247."))
+        if start > end:
+            raise ValueError(self.tr("O Slave ID inicial não pode ser superior ao final."))
+        return list(range(start, end + 1))
+
+    def selected_discovery_min_timeout_ms(self):
+        value = float(self.discovery_min_timeout_var.get())
+        if not (DISCOVERY_MIN_TIMEOUT_MS <= value <= DISCOVERY_MAX_TIMEOUT_MS):
+            raise ValueError(
+                self.trf(
+                    "O timeout mínimo tem de estar entre {minimum} e {maximum} ms.",
+                    minimum=DISCOVERY_MIN_TIMEOUT_MS,
+                    maximum=DISCOVERY_MAX_TIMEOUT_MS,
+                )
+            )
+        return value
+
+    def selected_discovery_attempts(self):
+        value = int(self.discovery_attempts_var.get())
+        if not (DISCOVERY_MIN_ATTEMPTS <= value <= DISCOVERY_MAX_ATTEMPTS):
+            raise ValueError(
+                self.trf(
+                    "Tentativas tem de estar entre {minimum} e {maximum}.",
+                    minimum=DISCOVERY_MIN_ATTEMPTS,
+                    maximum=DISCOVERY_MAX_ATTEMPTS,
+                )
+            )
+        return value
+
+    def discovery_config_label(self, parity, stopbits):
+        parity_letter = {"None": "N", "Even": "E", "Odd": "O"}[parity]
+        return f"8{parity_letter}{stopbits}"
+
+    def update_discovery_estimate(self):
+        try:
+            configs = self.selected_discovery_configs()
+            slaves = self.selected_discovery_slaves()
+            minimum_timeout_ms = self.selected_discovery_min_timeout_ms()
+            attempts = self.selected_discovery_attempts()
+        except Exception:
+            self.discovery_estimate_var.set(self.tr("Máx. estimado: —"))
+            self.discovery_progress_text_var.set("0 / 0")
+            return
+
+        total_units = len(configs) * len(slaves)
+        probes_per_unit = 2 if self.discovery_fc04_fallback_var.get() else 1
+        identify_devices = bool(self.discovery_device_identification_var.get())
+
+        seconds = 0.0
+        for baud, parity, stopbits in configs:
+            per_probe = (
+                discovery_request_transmit_seconds(baud, parity, stopbits)
+                + discovery_response_timeout_seconds(
+                    baud, parity, stopbits, minimum_timeout_ms
+                )
+            )
+            # Worst case: no Slave answers, so every probe uses all attempts.
+            seconds += len(slaves) * probes_per_unit * attempts * per_probe
+            if identify_devices:
+                # Worst case: every probed Slave exists and therefore receives
+                # one optional Basic Device Identification query.
+                seconds += len(slaves) * (
+                    device_identification_request_transmit_seconds(
+                        baud, parity, stopbits
+                    )
+                    + device_identification_timeout_seconds(
+                        baud, parity, stopbits, minimum_timeout_ms
+                    )
+                )
+            seconds += 0.025  # small reopen/reconfigure allowance
+        seconds += DISCOVERY_IDLE_CHECK_SECONDS if configs else 0.0
+
+        self.discovery_progress_text_var.set(f"0 / {total_units}")
+        suffix_parts = []
+        if probes_per_unit == 2:
+            suffix_parts.append("FC04 fallback")
+        if identify_devices:
+            suffix_parts.append("Device Identification")
+        suffix = (
+            self.trf(" (com {options})", options=" + ".join(suffix_parts))
+            if suffix_parts else ""
+        )
+        self.discovery_estimate_var.set(
+            self.trf(
+                "{configs} config. × {slaves} slaves — máx. estimado: {duration}",
+                configs=len(configs),
+                slaves=len(slaves),
+                duration=format_duration(seconds),
+            )
+            + suffix
+        )
+
+    def update_discovery_start_state(self):
+        if not hasattr(self, "discovery_start_btn"):
+            return
+        enabled = (
+            not self.discovery_active
+            and not self.busy
+            and bool(self.discovery_port_var.get().strip())
+            and bool(self.discovery_safety_var.get())
+        )
+        try:
+            enabled = enabled and bool(self.selected_discovery_configs())
+            self.selected_discovery_slaves()
+            self.selected_discovery_min_timeout_ms()
+            self.selected_discovery_attempts()
+        except Exception:
+            enabled = False
+        self.discovery_start_btn.configure(state="normal" if enabled else "disabled")
+
+    def clear_discovery_results(self):
+        if self.discovery_active:
+            return
+        for iid in self.discovery_tree.get_children():
+            self.discovery_tree.delete(iid)
+        self.discovery_found_count = 0
+        self.discovery_found_var.set(self.trf("Encontrados: {count}", count=0))
+        self.discovery_progress_var.set(0.0)
+        self.discovery_status_var.set(self.tr("Parado"))
+        self.update_discovery_estimate()
+
+    def open_discovery_serial_port(self, serial, port, baud, parity, stopbits):
+        parity_map = {
+            "None": serial.PARITY_NONE,
+            "Even": serial.PARITY_EVEN,
+            "Odd": serial.PARITY_ODD,
+        }
+        stop_map = {
+            "1": serial.STOPBITS_ONE,
+            "2": serial.STOPBITS_TWO,
+        }
+
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = int(baud)
+        ser.bytesize = serial.EIGHTBITS
+        ser.parity = parity_map[parity]
+        ser.stopbits = stop_map[stopbits]
+        ser.timeout = 0
+
+        ser.write_timeout = DISCOVERY_WRITE_TIMEOUT_SECONDS
+        ser.xonxoff = False
+        ser.rtscts = False
+        ser.dsrdtr = False
+
+        # Do not force RTS/DTR levels. Many USB-RS485 adapters manage direction
+        # internally and forcing modem-control lines can interfere with some
+        # adapters/drivers. Hardware flow control is disabled above.
+        ser.open()
+
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        try:
+            ser.reset_output_buffer()
+        except Exception:
+            pass
+
+        return ser
+
+    def start_discovery_scan(self):
+        if self.busy or self.discovery_active:
+            return
+
+        serial, _ = self.get_serial_modules()
+        if serial is None:
+            messagebox.showerror(
+                self.tr("pyserial em falta"),
+                self.tr("pyserial não está instalado. O build_exe.bat inclui-o automaticamente no EXE.")
+            )
+            return
+
+        if not self.discovery_safety_var.get():
+            messagebox.showwarning(
+                self.tr("Pesquisa ativa"),
+                self.tr("Confirma primeiro que não existe outro master ativo no barramento.")
+            )
+            return
+
+        try:
+            port = self.discovery_port_var.get().strip()
+            if not port:
+                raise ValueError(self.tr("Seleciona uma porta COM."))
+            configs = self.selected_discovery_configs()
+            if not configs:
+                raise ValueError(self.tr("Seleciona pelo menos uma configuração série."))
+            slaves = self.selected_discovery_slaves()
+            minimum_timeout_ms = self.selected_discovery_min_timeout_ms()
+            attempts = self.selected_discovery_attempts()
+        except Exception as exc:
+            messagebox.showerror(self.tr("Configuração inválida"), str(exc))
+            return
+
+        fallback_fc04 = bool(self.discovery_fc04_fallback_var.get())
+        identify_devices = bool(self.discovery_device_identification_var.get())
+
+        self.clear_discovery_results()
+        self.discovery_active = True
+        self.busy = True
+        self.discovery_stop_event.clear()
+        self.discovery_found_count = 0
+        self.discovery_progress_var.set(0.0)
+        self.discovery_status_var.set(self.tr("A iniciar pesquisa…"))
+
+        self.discovery_start_btn.configure(state="disabled")
+        self.discovery_stop_btn.configure(state="normal")
+        self.discovery_clear_btn.configure(state="disabled")
+        self.discovery_refresh_btn.configure(state="disabled")
+        self.discovery_port_combo.configure(state="disabled")
+
+        # Prevent passive capture/simulation from being started concurrently.
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="disabled")
+        self.restart_btn.configure(state="disabled")
+        self.set_sniffer_refresh_state("disabled")
+        self.set_simulation_button_state("disabled")
+
+        immutable_configs = list(configs)
+        immutable_slaves = list(slaves)
+
+        self.discovery_thread = threading.Thread(
+            target=self.discovery_worker,
+            args=(
+                serial, port, immutable_configs, immutable_slaves,
+                minimum_timeout_ms, fallback_fc04, identify_devices, attempts
+            ),
+            daemon=True,
+        )
+        try:
+            self.discovery_thread.start()
+        except Exception as exc:
+            # Restore the interface if the worker cannot even be started.
+            self.discovery_active = False
+            self.busy = False
+            self.discovery_thread = None
+            self.discovery_stop_btn.configure(state="disabled")
+            self.discovery_clear_btn.configure(state="normal")
+            self.discovery_refresh_btn.configure(state="normal")
+            self.discovery_port_combo.configure(state="readonly")
+            self.start_btn.configure(state="normal")
+            self.restart_btn.configure(state="normal")
+            self.set_sniffer_refresh_state("normal")
+            self.set_simulation_button_state("normal")
+            self.discovery_status_var.set(self.tr("Erro ao iniciar pesquisa"))
+            self.update_discovery_start_state()
+            messagebox.showerror(
+                self.tr("Erro na Bus Slave Finder"),
+                self.trf(
+                    "Não foi possível iniciar a thread de pesquisa:\n\n{error}",
+                    error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                )
+            )
+
+    def stop_discovery_scan(self):
+        if self.discovery_active:
+            self.discovery_status_var.set(self.tr("A parar…"))
+            self.discovery_stop_event.set()
+            self.discovery_stop_btn.configure(state="disabled")
+            # Wake/cancel pending driver I/O without closing the handle from
+            # the Tk thread while the discovery worker may still be using it.
+            cancel_serial_io(self.discovery_serial)
+
+    def discovery_worker(
+        self, serial, port, configs, slaves, minimum_timeout_ms, fallback_fc04,
+        identify_devices, attempts=DISCOVERY_DEFAULT_ATTEMPTS
+    ):
+        started = time.perf_counter()
+        total_units = len(configs) * len(slaves)
+        completed = 0
+        found_count = 0
+        fatal_error = None
+        context = str(port)
+        idle_checked = False
+
+        try:
+            for baud, parity, stopbits in configs:
+                if self.discovery_stop_event.is_set():
+                    break
+
+                config_label = self.discovery_config_label(parity, stopbits)
+                context = f"{port} — {baud} / {config_label}"
+                self.event_queue.put((
+                    "discovery_status",
+                    self.trf(
+                        "A configurar {baud} / {config}…",
+                        baud=baud,
+                        config=config_label,
+                    )
+                ))
+
+                ser = None
+                try:
+                    try:
+                        ser = self.open_discovery_serial_port(
+                            serial, port, baud, parity, stopbits
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            self.trf(
+                                "Não foi possível abrir {port} em {baud} / {config}: {error}",
+                                port=port,
+                                baud=baud,
+                                config=config_label,
+                                error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                            )
+                        ) from exc
+
+                    self.discovery_serial = ser
+                    if self.discovery_stop_event.wait(0.025):
+                        break
+
+                    if not idle_checked:
+                        # Last line of defence behind the safety checkbox:
+                        # never transmit onto a bus that is already busy.
+                        idle_checked = True
+                        self.event_queue.put((
+                            "discovery_status",
+                            self.tr("A verificar se o barramento está livre…"),
+                        ))
+                        traffic = bus_activity_detected(
+                            ser,
+                            DISCOVERY_IDLE_CHECK_SECONDS,
+                            self.discovery_stop_event,
+                        )
+                        if traffic:
+                            raise RuntimeError(
+                                self.trf(
+                                    "Foi detetado tráfego em {port} antes de transmitir "
+                                    "({count} bytes: {raw}). Pode existir outro master "
+                                    "ativo no barramento; a pesquisa não foi iniciada.",
+                                    port=port,
+                                    count=len(traffic),
+                                    raw=hex_bytes(traffic[:16]),
+                                )
+                            )
+                        if self.discovery_stop_event.is_set():
+                            break
+                        self.event_queue.put((
+                            "discovery_status",
+                            self.trf(
+                                "A configurar {baud} / {config}…",
+                                baud=baud,
+                                config=config_label,
+                            ),
+                        ))
+
+                    response_timeout_s = discovery_response_timeout_seconds(
+                        baud, parity, stopbits, minimum_timeout_ms
+                    )
+                    char_gap_s = modbus_rtu_interframe_gap_seconds(
+                        baud, discovery_bits_per_char(parity, stopbits)
+                    )
+
+                    for slave in slaves:
+                        if self.discovery_stop_event.is_set():
+                            break
+
+                        result = None
+                        used_fc = None
+                        elapsed_ms = None
+                        probe_fcs = [3, 4] if fallback_fc04 else [3]
+
+                        probe_plan = [
+                            (fc, attempt)
+                            for fc in probe_fcs
+                            for attempt in range(1, attempts + 1)
+                        ]
+                        for fc, attempt in probe_plan:
+                            if self.discovery_stop_event.is_set():
+                                break
+
+                            context = (
+                                f"{port} — {baud} / {config_label} / "
+                                f"Slave {slave} / FC{fc:02X}"
+                            )
+                            if attempts > 1:
+                                context += f" / {attempt}/{attempts}"
+
+                            # If this fails, the COM/driver is unhealthy. Do not
+                            # disguise it as a normal no-response slave timeout.
+                            try:
+                                ser.reset_input_buffer()
+                            except Exception as exc:
+                                raise RuntimeError(
+                                    self.trf(
+                                        "Falha ao preparar a receção em {context}: {error}",
+                                        context=context,
+                                        error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                    )
+                                ) from exc
+
+                            request = build_discovery_probe(slave, fc)
+                            started_probe = time.perf_counter()
+                            try:
+                                sent = write_discovery_request(
+                                    ser, request, baud, parity, stopbits,
+                                    self.discovery_stop_event, serial
+                                )
+                            except Exception as exc:
+                                raise RuntimeError(
+                                    self.trf(
+                                        "Falha ao transmitir em {context}: {error}",
+                                        context=context,
+                                        error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                    )
+                                ) from exc
+
+                            if not sent or self.discovery_stop_event.is_set():
+                                break
+
+                            try:
+                                result = read_discovery_response(
+                                    ser, slave, fc, response_timeout_s,
+                                    self.discovery_stop_event
+                                )
+                            except Exception as exc:
+                                raise RuntimeError(
+                                    self.trf(
+                                        "Falha ao receber em {context}: {error}",
+                                        context=context,
+                                        error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                    )
+                                ) from exc
+
+                            if result is not None:
+                                elapsed_ms = (
+                                    time.perf_counter() - started_probe
+                                ) * 1000.0
+                                used_fc = fc
+                                if char_gap_s > 0:
+                                    self.discovery_stop_event.wait(
+                                        min(char_gap_s, 0.05)
+                                    )
+                                break
+
+                        if result is not None and used_fc is not None:
+                            found_count += 1
+                            if result["kind"] == "EXCEPTION":
+                                code = result["exception_code"]
+                                name = MODBUS_EXCEPTION_CODES.get(
+                                    code, ("Unknown/Reserved Exception", "")
+                                )[0]
+                                result_text = f"Exception 0x{code:02X} — {name}"
+                            else:
+                                result_text = "Response"
+
+                            device_id_text = ""
+                            if identify_devices and not self.discovery_stop_event.is_set():
+                                context = (
+                                    f"{port} — {baud} / {config_label} / "
+                                    f"Slave {slave} / FC43/14"
+                                )
+                                try:
+                                    device_result = read_basic_device_identification(
+                                        ser,
+                                        slave,
+                                        baud,
+                                        parity,
+                                        stopbits,
+                                        minimum_timeout_ms,
+                                        self.discovery_stop_event,
+                                        serial,
+                                    )
+                                except Exception as exc:
+                                    raise RuntimeError(
+                                        self.trf(
+                                            "Falha em Device Identification em {context}: {error}",
+                                            context=context,
+                                            error=f"{type(exc).__name__}: {self.tr(str(exc))}",
+                                        )
+                                    ) from exc
+                                device_id_text = format_device_identification(
+                                    device_result
+                                )
+                                if char_gap_s > 0:
+                                    self.discovery_stop_event.wait(
+                                        min(char_gap_s, 0.05)
+                                    )
+
+                            self.event_queue.put((
+                                "discovery_found",
+                                {
+                                    "slave": slave,
+                                    "baud": baud,
+                                    "config": config_label,
+                                    "fc": f"{used_fc:02X}",
+                                    "result": result_text,
+                                    "response_ms": elapsed_ms,
+                                    "device_id": device_id_text,
+                                    "raw": hex_bytes(result["frame"]),
+                                }
+                            ))
+
+                        completed += 1
+                        elapsed = time.perf_counter() - started
+                        eta = (
+                            max(
+                                0.0,
+                                (elapsed / completed) * (total_units - completed)
+                            )
+                            if completed > 0 else 0.0
+                        )
+
+                        self.event_queue.put((
+                            "discovery_progress",
+                            {
+                                "completed": completed,
+                                "total": total_units,
+                                "baud": baud,
+                                "config": config_label,
+                                "slave": slave,
+                                "elapsed": elapsed,
+                                "eta": eta,
+                                "found": found_count,
+                            }
+                        ))
+
+                finally:
+                    if ser is not None:
+                        cancel_serial_io(ser)
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+                    self.discovery_serial = None
+
+        except Exception as exc:
+            if not self.discovery_stop_event.is_set():
+                fatal_error = str(exc) or f"{context}: {type(exc).__name__}"
+
+        elapsed = time.perf_counter() - started
+        self.event_queue.put((
+            "discovery_done",
+            {
+                "stopped": self.discovery_stop_event.is_set(),
+                "error": fatal_error,
+                "elapsed": elapsed,
+                "completed": completed,
+                "total": total_units,
+                "found": found_count,
+            }
+        ))
+
+    def apply_discovery_progress(self, payload):
+        completed = int(payload["completed"])
+        total = max(1, int(payload["total"]))
+        self.discovery_progress_var.set(100.0 * completed / total)
+        self.discovery_progress_text_var.set(
+            f"{completed} / {payload['total']} — "
+            f"{payload['baud']} / {payload['config']} / Slave {payload['slave']}"
+        )
+        self.discovery_found_var.set(self.trf("Encontrados: {count}", count=payload["found"]))
+        self.discovery_status_var.set(
+            self.trf(
+                "Decorrido {elapsed} — restante ~{remaining}",
+                elapsed=format_duration(payload["elapsed"]),
+                remaining=format_duration(payload["eta"]),
+            )
+        )
+
+    def add_discovery_result(self, payload):
+        self.discovery_found_count += 1
+        self.discovery_found_var.set(
+            self.trf("Encontrados: {count}", count=self.discovery_found_count)
+        )
+        self.discovery_tree.insert(
+            "", "end",
+            values=(
+                payload["slave"],
+                payload["baud"],
+                payload["config"],
+                payload["fc"],
+                payload["result"],
+                f"{payload['response_ms']:.1f}" if payload.get("response_ms") is not None else "",
+                payload.get("device_id", ""),
+                payload["raw"],
+            )
+        )
+
+    def finish_discovery_ui(self, payload):
+        self.discovery_active = False
+        self.busy = False
+        self.discovery_stop_event.clear()
+        self.discovery_serial = None
+        self.discovery_thread = None
+
+        self.discovery_stop_btn.configure(state="disabled")
+        self.discovery_clear_btn.configure(state="normal")
+        self.discovery_refresh_btn.configure(state="normal")
+        self.discovery_port_combo.configure(state="readonly")
+
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        self.restart_btn.configure(state="normal")
+        self.set_sniffer_refresh_state("normal")
+        self.set_simulation_button_state("normal")
+
+        if payload.get("error"):
+            self.discovery_status_var.set(self.tr("Erro na pesquisa"))
+            messagebox.showerror(self.tr("Erro na Bus Slave Finder"), payload["error"])
+        elif payload.get("stopped"):
+            self.discovery_status_var.set(
+                self.trf(
+                    "Pesquisa parada — {found} encontrados — {elapsed}",
+                    found=payload["found"],
+                    elapsed=format_duration(payload["elapsed"]),
+                )
+            )
+        else:
+            self.discovery_progress_var.set(100.0)
+            self.discovery_status_var.set(
+                self.trf(
+                    "Pesquisa concluída — {found} encontrados — {elapsed}",
+                    found=payload["found"],
+                    elapsed=format_duration(payload["elapsed"]),
+                )
+            )
+
+        self.update_discovery_estimate()
+        self.update_discovery_start_state()
+        self.update_com_status()
+
