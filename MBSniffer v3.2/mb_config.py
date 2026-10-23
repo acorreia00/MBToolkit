@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "MBSniffer"
-APP_VERSION = "3.1"
+APP_VERSION = "3.2"
 
 # Simulação:
 #   0 = simulação inativa (o botão não aparece no GUI)
@@ -46,6 +46,24 @@ MIN_PENDING_REQUEST_TIMEOUT_SECONDS = 1.0
 DEFAULT_PENDING_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_REQUEST_TIMEOUT_SECONDS = 300.0
 PENDING_REQUEST_TIMEOUT_SECONDS = DEFAULT_PENDING_REQUEST_TIMEOUT_SECONDS
+
+# Master (poll) tab. Modbus limits per request; RTU response timeout and the
+# silent gap between two requests are user settings.
+MASTER_MAX_READ_BITS = 2000
+MASTER_MAX_READ_REGISTERS = 125
+MASTER_MAX_WRITE_BITS = 1968
+MASTER_MAX_WRITE_REGISTERS = 123
+MASTER_DEFAULT_RESPONSE_TIMEOUT_MS = 1000
+MASTER_MIN_RESPONSE_TIMEOUT_MS = 10
+MASTER_MAX_RESPONSE_TIMEOUT_MS = 10000
+MASTER_DEFAULT_DELAY_MS = 20
+MASTER_MIN_DELAY_MS = 0
+MASTER_MAX_DELAY_MS = 10000
+MASTER_DEFAULT_SCAN_MS = 1000
+MASTER_MAX_SCAN_MS = 3600000
+MASTER_MAX_WINDOWS = 32
+MASTER_WORKSPACE_FORMAT = "MBSniffer Master workspace"
+MASTER_WORKSPACE_VERSION = 1
 
 # Sniffer burst assembly: extra wait when a burst ends with the start of a
 # recognised frame. USB-serial adapters deliver bytes in latency-timer
@@ -211,7 +229,7 @@ def load_ui_settings() -> dict:
     if data.get("language") in ("Português", "English"):
         result["language"] = data["language"]
 
-    if data.get("last_main_tab") in ("Sniffer", "Bus Slave Finder"):
+    if data.get("last_main_tab") in ("Sniffer", "Bus Slave Finder", "Master"):
         result["last_main_tab"] = data["last_main_tab"]
 
     sniffer_in = data.get("sniffer")
@@ -354,6 +372,34 @@ def load_ui_settings() -> dict:
             ),
         }
 
+    master_in = data.get("master")
+    if isinstance(master_in, dict):
+        result["master"] = {
+            "baud": _validated_choice(
+                str(master_in.get("baud", "")),
+                tuple(str(v) for v in DISCOVERY_BAUD_RATES),
+                "9600",
+            ),
+            "parity": _validated_choice(
+                master_in.get("parity"), ("None", "Even", "Odd"), "None"
+            ),
+            "stop_bits": _validated_choice(
+                str(master_in.get("stop_bits", "")), ("1", "2"), "1"
+            ),
+            "response_timeout_ms": _validated_int_string(
+                master_in.get("response_timeout_ms"),
+                MASTER_MIN_RESPONSE_TIMEOUT_MS,
+                MASTER_MAX_RESPONSE_TIMEOUT_MS,
+                MASTER_DEFAULT_RESPONSE_TIMEOUT_MS,
+            ),
+            "delay_ms": _validated_int_string(
+                master_in.get("delay_ms"),
+                MASTER_MIN_DELAY_MS,
+                MASTER_MAX_DELAY_MS,
+                MASTER_DEFAULT_DELAY_MS,
+            ),
+        }
+
     return result
 
 
@@ -390,7 +436,7 @@ def get_application_directory() -> Path:
 
     - PyInstaller EXE: directory containing MBSniffer.exe.
     - Packaged Python/BAT mode: directory containing the root MBSniffer.bat.
-      The Python sources live inside the versioned child folder, e.g. ``MBSniffer v3.1``.
+      The Python sources live inside the versioned child folder, e.g. ``MBSniffer v3.2``.
     - Development Python mode: directory containing this module.
     """
     try:

@@ -27,6 +27,7 @@ from mb_config import (
 )
 from mb_protocol import SessionMetrics
 from mb_slave_finder import SlaveFinderMixin
+from mb_master_ui import MasterMixin
 from mb_capture import CaptureMixin
 from mb_view import ViewMixin
 from mb_widgets import RefreshButton, ToggleSwitch
@@ -43,7 +44,7 @@ from mb_i18n import (
 )
 
 
-class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
+class SnifferApp(MasterMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} v{APP_VERSION}")
@@ -320,6 +321,9 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             if callable(setter):
                 setter(dark)
 
+        if hasattr(self, "master_canvas"):
+            self.master_apply_palette(dark)
+
     def configure_inspector_result_styles(self):
         """
         Match the Inspector Result foreground to the Traffic result palette.
@@ -554,6 +558,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             self.update_slave_heading()
             self.update_frame_inspector(self.selected_record())
             self.update_discovery_estimate()
+            self.master_apply_language()
         except (AttributeError, tk.TclError):
             pass
 
@@ -618,22 +623,20 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
 
     def _restore_saved_main_tab(self):
         saved = self.ui_settings.get("last_main_tab", "Sniffer")
+        pages = {"Bus Slave Finder": self.discovery_page, "Master": self.master_page}
         try:
-            self.main_notebook.select(
-                self.discovery_page if saved == "Bus Slave Finder"
-                else self.sniffer_page
-            )
+            self.main_notebook.select(pages.get(saved, self.sniffer_page))
         except tk.TclError:
             pass
 
     def _current_main_tab_name(self):
         try:
             selected = self.main_notebook.select()
-            return (
-                "Bus Slave Finder"
-                if selected == str(self.discovery_page)
-                else "Sniffer"
-            )
+            if selected == str(self.discovery_page):
+                return "Bus Slave Finder"
+            if selected == str(self.master_page):
+                return "Master"
+            return "Sniffer"
         except Exception:
             return "Sniffer"
 
@@ -718,6 +721,13 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
                     "device_identification": bool(
                         self.discovery_device_identification_var.get()
                     ),
+                },
+                "master": {
+                    "baud": self.master_baud_var.get(),
+                    "parity": self.master_parity_var.get(),
+                    "stop_bits": self.master_stop_var.get(),
+                    "response_timeout_ms": self.master_timeout_var.get(),
+                    "delay_ms": self.master_delay_var.get(),
                 },
             }
             save_ui_settings(settings=payload)
@@ -1034,6 +1044,9 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         self.discovery_page.columnconfigure(0, weight=1)
         self.discovery_page.rowconfigure(3, weight=1)
         self.main_notebook.add(self.discovery_page, text="Bus Slave Finder")
+
+        self.master_page = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.master_page, text="Master")
 
         # Global Light/Dark control: root-level overlay in the top-right corner.
         # It is outside both tabs and therefore applies equally to Sniffer and
@@ -2287,12 +2300,52 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
             "a mesma aplicação faça pesquisa ativa e captura ao mesmo tempo.\n"
         )
 
+        h("Master — leitura e escrita como master Modbus RTU\n", "heading")
+        h(
+            "O separador Master transmite pedidos: só deve ser usado quando não existe "
+            "outro master ativo no barramento. Ao ligar, a aplicação escuta o barramento "
+            f"durante {DISCOVERY_IDLE_CHECK_SECONDS:g} s e não transmite se detetar tráfego. "
+            "Enquanto o Master está ligado, o Sniffer e o Bus Slave Finder ficam bloqueados.\n"
+        )
+        h(
+            "Cada janela lê uma zona de memória de um Slave: Slave ID, função (FC01 Coils, "
+            "FC02 Discrete Inputs, FC03 Holding Registers ou FC04 Input Registers), endereço, "
+            "quantidade e scan rate. Base 0 mostra o PDU Address; Base 1 numera a partir de 1, "
+            "como em muitos manuais. As alterações só valem depois de “Aplicar”.\n"
+        )
+        h(
+            "Todas as janelas partilham a mesma porta COM: o Modbus RTU só admite um pedido "
+            "de cada vez, por isso as janelas são servidas à vez conforme o scan rate. "
+            "Escritas e “Ler 1x” passam à frente das leituras cíclicas. Entre dois pedidos "
+            "fica sempre o “Atraso entre pedidos” (no mínimo t3.5).\n"
+        )
+        h(
+            "Formatos: 16 bits com e sem sinal, hex e binário; 32 bits com e sem sinal e "
+            "float, nas ordens de bytes ABCD (big-endian), CDAB (palavras trocadas), BADC "
+            "(bytes trocados) e DCBA (little-endian). Os valores de 32 bits ocupam dois "
+            "registos e aparecem na linha do primeiro.\n"
+        )
+        h(
+            "Escrita: duplo clique num valor de uma janela FC01 ou FC03. Coils com FC05 ou "
+            "FC15, registos com FC06 ou FC16; vários valores separados por “;” são escritos "
+            "em endereços consecutivos com FC15/FC16. Slave 0 envia em broadcast, sem "
+            "resposta. Depois de uma escrita aceite, a janela é lida de novo.\n"
+        )
+        h(
+            "Cada janela mostra Tx, erros, timeouts, o último tempo de resposta e o último "
+            "erro (Timeout, Exception ou resposta inválida). “Destacar” abre a janela à parte "
+            "do separador; “Ancorar” ou fechar essa janela devolve-a ao separador. "
+            "“Guardar workspace” grava a ligação, todas as janelas, formatos e nomes num "
+            "ficheiro .mbsw.\n"
+        )
+
         h("Preferências guardadas\n", "heading")
         h(
             "As preferências do utilizador são guardadas em "
             "%APPDATA%\\MBSniffer\\settings.json. Incluem Light/Dark, último separador, "
             "parâmetros série, Frame gap, Pending timeout, Auto-scroll, Separar transações, "
-            "Realçar resultados e opções do Bus Slave Finder.\n"
+            "Realçar resultados, opções do Bus Slave Finder e parâmetros de ligação do "
+            "Master. As janelas do Master guardam-se num workspace (.mbsw).\n"
         )
         h(
             "As portas COM não são guardadas porque são específicas de cada computador. "
@@ -2466,6 +2519,7 @@ class SnifferApp(SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk):
         )
 
         self.build_discovery_tab(self.discovery_page)
+        self.build_master_tab(self.master_page)
         self.update_stats_labels()
         self.update_frame_inspector(None)
 

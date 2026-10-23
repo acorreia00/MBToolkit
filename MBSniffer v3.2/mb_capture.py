@@ -104,6 +104,14 @@ class CaptureMixin:
                 self.discovery_port_var.set("")
             self.update_discovery_start_state()
 
+        if hasattr(self, "master_port_combo"):
+            self.master_port_combo["values"] = ports
+            if ports:
+                if self.master_port_var.get().strip() not in ports:
+                    self.master_port_var.set(ports[0])
+            elif not getattr(self, "master_active", False):
+                self.master_port_var.set("")
+
         self.update_com_status()
 
     def detected_ports(self):
@@ -755,6 +763,9 @@ class CaptureMixin:
                 elif event == "discovery_done":
                     self.finish_discovery_ui(payload)
 
+                elif event.startswith("master_"):
+                    self.handle_master_event(event, payload)
+
             flush_frames()
 
             if self.metrics.expire_pending(time.time()):
@@ -830,6 +841,9 @@ class CaptureMixin:
         # Cancel driver I/O before joining workers so shutdown is not held up
         # by a serial read/write timeout.
         cancel_serial_io(self.discovery_serial)
+        stopper = getattr(self, "master_shutdown", None)
+        if callable(stopper):
+            stopper()
 
         if self.discovery_thread is not None:
             try:
