@@ -2952,4 +2952,7 @@ guarda só a configuração; a simulação de falhas entra já na Fase 1, por Sl
   `get_master_workspaces_folder()` move uma vez os `.mbsw` soltos em
   `Workspaces`. `workspace_path()` / `list_workspaces()` de `mb_table_ui.py`
   recebem sempre a pasta; `mb_master_ui.py` tem as versões do Master.
-- Testes: 88 → 112 (`tests/test_slave.py` e migração da pasta do Master).
+- Campo Tabela do Slave com o código e o nome ("03 Holding Registers"), como o
+  campo FC do Master; o cabeçalho das janelas do Master e do Slave mostra o
+  código e o nome (`FC03 Read Holding Registers` / `FC03 Holding Registers`).
+- Testes: 88 → 113 (`tests/test_slave.py`, migração da pasta do Master e campo Tabela).

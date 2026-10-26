@@ -48,8 +48,17 @@ EXCEPTION_ILLEGAL_ADDRESS = 0x02
 EXCEPTION_ILLEGAL_VALUE = 0x03
 
 
+# Function code that reads each table (shown with the table name).
+TABLE_READ_FC = {"coils": 1, "discrete": 2, "holding": 3, "input": 4}
+
+
 def table_label(table):
     return TABLE_LABELS.get(table, table)
+
+
+def table_choice_label(table):
+    """Table field text: read function code + name, e.g. "03 Holding Registers"."""
+    return f"{TABLE_READ_FC[table]:02d} {TABLE_LABELS[table]}"
 
 
 # ---------------------------------------------------------------------------

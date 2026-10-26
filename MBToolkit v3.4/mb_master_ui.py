@@ -356,7 +356,7 @@ class MasterMixin(TableUiMixin):
         return window.title or self.trf("Janela {number}", number=window.number)
 
     def _master_window_summary(self, window):
-        return (f"Slave {window.slave} · FC{window.fc:02d} · "
+        return (f"Slave {window.slave} · FC{window.fc:02d} {FUNCTION_NAMES[window.fc]} · "
                 f"{window.address + window.base} · {window.qty}")
 
     def _master_window_title(self, window):

@@ -355,8 +355,9 @@ Regras:
   `master_stopped`; respostas de uma definição entretanto alterada são
   ignoradas.
 - Cabeçalho de cada janela: nome (`MasterWindow.title`, vazio = "Janela N";
-  duplo clique ou "Renomear" para mudar), resumo Slave/FC/endereço/quantidade e
-  botões "Renomear", "Destacar"/"Ancorar" e "✕" (fechar). O fecho fica no
+  duplo clique ou "Renomear" para mudar), resumo Slave / FC com o nome da
+  função / endereço / quantidade (p. ex. `Slave 1 · FC03 Read Holding
+  Registers · 0 · 6`; no Slave `FC03 Holding Registers`) e botões "Renomear", "Destacar"/"Ancorar" e "✕" (fechar). O fecho fica no
   cabeçalho para nunca depender da largura da janela (escala do Windows).
 - A grelha calcula as colunas a partir da largura pedida pelas janelas (cresce
   com a escala do Windows), nunca abaixo de 600 px por coluna.
@@ -407,7 +408,8 @@ Regras:
 ## 15. Slave (simulador)
 
 - Cada janela é uma tabela de um Slave simulado: Slave ID 1–247, tabela
-  (`coils`, `discrete`, `holding`, `input`), endereço e quantidade
+  (`coils`, `discrete`, `holding`, `input`; no campo mostra-se o código de
+  leitura e o nome, p. ex. "03 Holding Registers", `table_choice_label()`), endereço e quantidade
   (1–`SLAVE_MAX_QTY` = 2000), base 0/1, formato; máx. 32 janelas. Só existem
   os endereços definidos pelas janelas (`SlaveStore.set_areas()`, chamado ao
   criar, aplicar ou fechar janelas). Janelas sobre os mesmos endereços partilham

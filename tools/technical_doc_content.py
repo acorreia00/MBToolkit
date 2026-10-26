@@ -556,7 +556,7 @@ the table shows the new value.</p>
 <li><b>Apply</b> validates the fields and updates the engine; a changed data area resets
 the counters. Results of a request sent with the previous definition are ignored.</li>
 <li>Each pane has a header with the window name (<b>Rename</b> or double-click),
-a Slave/FC/address/quantity summary, <b>Pop out</b> and a <b>✕</b> close button, so
+a summary with the Slave, the function code and name (e.g. FC03 Read Holding Registers), the address and the quantity, <b>Pop out</b> and a <b>✕</b> close button, so
 closing never depends on the pane width.</li>
 <li><b>Pop out</b> rebuilds the pane inside a <code>tk.Toplevel</code>; closing it or
 <b>Dock</b> returns it to the grid. The grid uses as many equal columns as the tab
@@ -640,6 +640,9 @@ format and scale (<code>slave_set_value()</code>). Nothing is sent on the bus.</
 <li>Each window counts the requests and exceptions that touched its addresses and shows
 the last request; the connection bar counts requests, responses, exceptions, broadcasts
 and requests for other IDs.</li>
+<li>The Table field and the window header show the read function code with the table
+name (<code>table_choice_label()</code>: "03 Holding Registers"), like the FC field of
+the Master.</li>
 <li>Formats, scales, names, Copy, address base, drag selection, Rename, Pop out and
 close come from <code>TableUiMixin</code>, exactly as in the Master.</li>
 <li>The Slave Workspace menu saves configuration only (connection, windows, names,

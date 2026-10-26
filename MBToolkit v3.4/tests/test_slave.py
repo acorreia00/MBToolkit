@@ -395,6 +395,14 @@ class SlaveWindowTests(unittest.TestCase):
                 SlaveWindow.validated_kwargs(bad)
         validate_area(1, "input", 65535, 1)
 
+    def test_table_field_shows_the_read_function_code(self):
+        from mb_slave import table_choice_label
+        from mb_slave_ui import TABLE_CHOICES, TABLE_KEYS_BY_LABEL
+        self.assertEqual(TABLE_CHOICES, ("01 Coils", "02 Discrete Inputs",
+                                         "03 Holding Registers", "04 Input Registers"))
+        for table in ("coils", "discrete", "holding", "input"):
+            self.assertEqual(TABLE_KEYS_BY_LABEL[table_choice_label(table)], table)
+
     def test_window_overlap(self):
         window = SlaveWindow(1, 1, address=10, qty=5)
         self.assertEqual(window.overlap(0, 12), (0, 2))

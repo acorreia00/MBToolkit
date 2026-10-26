@@ -46,6 +46,8 @@ from mb_slave import (
     SlaveStore,
     default_fault,
     fault_active,
+    TABLE_READ_FC,
+    table_choice_label,
     table_label,
     validate_fault,
 )
@@ -70,8 +72,8 @@ from mb_theme import theme_colors
 from mb_widgets import RefreshButton
 
 SLAVE_WHEEL_TAG = "MBToolkit.SlaveWheel"
-TABLE_CHOICES = tuple(TABLE_LABELS[t] for t in TABLES)
-TABLE_KEYS_BY_LABEL = {label: key for key, label in TABLE_LABELS.items()}
+TABLE_CHOICES = tuple(table_choice_label(t) for t in TABLES)
+TABLE_KEYS_BY_LABEL = {table_choice_label(t): t for t in TABLES}
 
 
 def fault_parts(fault):
@@ -341,7 +343,8 @@ class SlaveMixin(TableUiMixin):
         return window.title or self.trf("Janela {number}", number=window.number)
 
     def _slave_window_summary(self, window):
-        return (f"Slave {window.slave} · {table_label(window.table)} · "
+        return (f"Slave {window.slave} · FC{TABLE_READ_FC[window.table]:02d} "
+                f"{table_label(window.table)} · "
                 f"{window.address + window.base} · {window.qty}")
 
     def _slave_fault_text(self, slave):
@@ -402,14 +405,14 @@ class SlaveMixin(TableUiMixin):
         definition = ttk.Frame(frame)
         definition.grid(row=1, column=0, sticky="w", padx=6, pady=(2, 2))
         pane["slave_var"] = tk.StringVar(value=str(window.slave))
-        pane["table_var"] = tk.StringVar(value=TABLE_LABELS[window.table])
+        pane["table_var"] = tk.StringVar(value=table_choice_label(window.table))
         pane["address_var"] = tk.StringVar(value=str(window.address + window.base))
         pane["qty_var"] = tk.StringVar(value=str(window.qty))
         pane["format_var"] = tk.StringVar(value=FORMAT_LABELS[window.fmt])
         layout = (
             ("Slave", ttk.Spinbox(definition, from_=1, to=247, width=4,
                                   textvariable=pane["slave_var"])),
-            ("Tabela", ttk.Combobox(definition, values=TABLE_CHOICES, width=18,
+            ("Tabela", ttk.Combobox(definition, values=TABLE_CHOICES, width=22,
                                     state="readonly", textvariable=pane["table_var"])),
             ("Endereço", ttk.Entry(definition, width=6, textvariable=pane["address_var"])),
             ("Qtd.", ttk.Entry(definition, width=5, textvariable=pane["qty_var"])),
@@ -587,7 +590,7 @@ class SlaveMixin(TableUiMixin):
         try:
             return (
                 pane["slave_var"].get().strip() != str(window.slave)
-                or pane["table_var"].get() != TABLE_LABELS[window.table]
+                or pane["table_var"].get() != table_choice_label(window.table)
                 or pane["address_var"].get().strip() != str(window.address + window.base)
                 or pane["qty_var"].get().strip() != str(window.qty)
                 or FORMAT_KEYS_BY_LABEL.get(pane["format_var"].get()) != window.fmt
