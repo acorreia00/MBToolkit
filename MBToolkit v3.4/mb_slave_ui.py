@@ -10,7 +10,6 @@ Slave ID. The window grid, value table and Workspace menu are shared with the
 Master tab (``mb_table_ui.py``).
 """
 
-import json
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -19,6 +18,7 @@ from mb_config import (
     DISCOVERY_BAUD_RATES,
     MODBUS_EXCEPTION_CODES,
     SLAVE_FAULT_MAX_DELAY_MS,
+    SLAVE_GENERATOR_TICK_MS,
     SLAVE_HIGHLIGHT_SECONDS,
     SLAVE_MAX_QTY,
     SLAVE_MAX_WINDOWS,
@@ -34,22 +34,28 @@ from mb_master import (
     encode_coil_value,
     encode_register_value,
     format_window_values,
+    READ_FUNCTION_CODES,
     raw_text_for_scaled,
     register_groups,
+    unscale_value,
 )
 from mb_slave import (
+    BIT_GENERATORS,
     BIT_TABLES,
     FAULT_EXCEPTION_CODES,
-    TABLE_LABELS,
+    FC_TABLES,
+    REGISTER_GENERATORS,
+    TABLE_READ_FC,
     TABLES,
     SlaveEngine,
     SlaveStore,
     default_fault,
     fault_active,
-    TABLE_READ_FC,
     table_choice_label,
     table_label,
     validate_fault,
+    validate_generator,
+    ValueGenerator,
 )
 from mb_table_ui import (
     SERIAL_PARITIES,
@@ -59,19 +65,21 @@ from mb_table_ui import (
     TABLE_PANE_MIN_ROWS,
     TABLE_PANE_MIN_WIDTH,
     TableUiMixin,
+    TableWorkspace,
     apply_format_to_rows,
     list_workspaces,
     parse_int_field,
-    validate_workspace_name,
     validated_formats,
     validated_names,
     validated_scales,
-    workspace_path,
 )
 from mb_theme import theme_colors
 from mb_widgets import RefreshButton
 
 SLAVE_WHEEL_TAG = "MBToolkit.SlaveWheel"
+# Automatic value kinds as shown in the dialog (PT canonical captions).
+GENERATOR_LABELS = {"counter": "Contador", "ramp": "Rampa", "sine": "Senoide",
+                    "random": "Aleatório", "toggle": "Alternar 0/1"}
 TABLE_CHOICES = tuple(table_choice_label(t) for t in TABLES)
 TABLE_KEYS_BY_LABEL = {table_choice_label(t): t for t in TABLES}
 
@@ -94,7 +102,8 @@ class SlaveWindow:
     """State of one simulated data table (independent of where it is shown)."""
 
     def __init__(self, window_id, number, slave=1, table="holding", address=0, qty=10,
-                 base=0, fmt=DEFAULT_FORMAT, names=None, title="", formats=None, scales=None):
+                 base=0, fmt=DEFAULT_FORMAT, names=None, title="", formats=None, scales=None,
+                 generators=None):
         self.window_id = window_id
         self.number = number
         # User-chosen window name; empty means the default "Janela N".
@@ -108,6 +117,9 @@ class SlaveWindow:
         self.names = dict(names or {})  # PDU address -> label
         self.formats = {int(a): f for a, f in (formats or {}).items() if f in FORMAT_SIZES}
         self.scales = {int(a): dict(s) for a, s in (scales or {}).items()}
+        # PDU address -> automatic value (validate_generator()) of the value
+        # that starts there.
+        self.generators = {int(a): dict(g) for a, g in (generators or {}).items()}
         self.popped = False
         # Row index -> time.monotonic() until which it is shown as written.
         self.highlight = {}
@@ -148,7 +160,19 @@ class SlaveWindow:
             "names": {str(a): n for a, n in sorted(self.names.items())},
             "formats": {str(a): f for a, f in sorted(self.formats.items())},
             "scales": {str(a): s for a, s in sorted(self.scales.items())},
+            "generators": {str(a): g for a, g in sorted(self.generators.items())},
         }
+
+    def drop_invalid_generators(self):
+        """Keep only automatic values that still fit the window's area and table."""
+        kept = {}
+        for address, config in self.generators.items():
+            if self.address <= address < self.address + self.qty:
+                try:
+                    kept[address] = validate_generator(config, self.bits)
+                except ValueError:
+                    continue
+        self.generators = kept
 
     @staticmethod
     def validated_kwargs(data):
@@ -167,7 +191,50 @@ class SlaveWindow:
             "names": validated_names(data.get("names", {})),
             "formats": validated_formats(data.get("formats", {})),
             "scales": validated_scales(data.get("scales", {})),
+            "generators": validated_generators(data.get("generators", {}), table in BIT_TABLES),
         }
+
+
+def validated_generators(generators, bits):
+    """Automatic values of a workspace window entry; invalid ones are dropped."""
+    result = {}
+    for key, item in (generators.items() if isinstance(generators, dict) else ()):
+        try:
+            if str(key).isdigit() and int(key) <= 0xFFFF:
+                result[int(key)] = validate_generator(item, bits)
+        except ValueError:
+            continue
+    return result
+
+
+def slave_definition_from_record(record):
+    """Slave window (slave, table, address, qty) behind a Traffic record, or None.
+
+    Reads (FC01–FC04) give their table and requested area; writes (FC05/06/
+    15/16) the written Coils / Holding Registers. A REQUEST carries its own
+    address; a RESPONSE/EXCEPTION of a read carries the one of its request.
+    """
+    try:
+        slave = int(record.get("slave", ""))
+        fc = int(str(record.get("fc", "")), 16) & 0x7F
+    except (TypeError, ValueError):
+        return None
+    if fc not in FC_TABLES or not 1 <= slave <= 247:
+        return None
+    if record.get("type") == "REQUEST" or (fc not in READ_FUNCTION_CODES
+                                           and record.get("type") == "RESPONSE"):
+        address, qty = record.get("pdu_address"), record.get("qty")
+    else:
+        address, qty = record.get("request_pdu_address"), record.get("request_qty")
+    if fc in (5, 6):
+        qty = 1
+    if address is None or qty is None:
+        return None
+    try:
+        validate_area(slave, FC_TABLES[fc], address, qty)
+    except (ValueError, TypeError):
+        return None
+    return {"slave": slave, "table": FC_TABLES[fc], "address": int(address), "qty": int(qty)}
 
 
 def validate_area(slave, table, address, qty):
@@ -204,9 +271,10 @@ class SlaveMixin(TableUiMixin):
         self.slave_active = False
         self._slave_reflow_after_id = None
         self._slave_tick_after_id = None
-        self.slave_workspace_dirty = False
-        self._slave_loading = False
-        self.slave_current_workspace = ""
+        # (window_id, PDU address) -> (ValueGenerator, start time) of the
+        # automatic values; recomputed every SLAVE_GENERATOR_TICK_MS.
+        self._slave_generators = {}
+        self._slave_generator_after_id = None
         self._slave_reset_stats()
 
         page.columnconfigure(0, weight=1)
@@ -293,6 +361,12 @@ class SlaveMixin(TableUiMixin):
         self.slave_workspace_var = tk.StringVar(value="")
         ttk.Label(toolbar, textvariable=self.slave_workspace_var).grid(
             row=0, column=2, padx=(0, 6))
+        self.slave_workspace = TableWorkspace(
+            self, folder=get_slave_workspaces_folder, formats=(SLAVE_WORKSPACE_FORMAT,),
+            data=self.slave_workspace_data, load=self._slave_load_workspace_data,
+            label_var=self.slave_workspace_var,
+            close_question="Guardar alterações ao workspace do Slave \"{name}\"?",
+        )
         ttk.Label(
             toolbar,
             text=("Duplo clique num valor para o alterar, num nome para o editar. "
@@ -321,12 +395,10 @@ class SlaveMixin(TableUiMixin):
             self.after(10, lambda: self._slave_restore_workspace(last))
         else:
             self.slave_add_window()
-            self.slave_workspace_dirty = False
 
     def _slave_restore_workspace(self, name):
         if not self.slave_open_workspace(name, quiet=True):
             self.slave_add_window()
-            self.slave_workspace_dirty = False
 
     # -- texts -------------------------------------------------------------------
     def _slave_reset_stats(self):
@@ -504,10 +576,16 @@ class SlaveMixin(TableUiMixin):
             texts = format_window_values(values, window.address, window.fmt,
                                          window.formats, window.scales)
         now = time.monotonic()
+        generated = set()
+        for address in window.generators:
+            offset, size, _fmt = window.group_of_row(address - window.address)
+            generated.update(range(offset, offset + size))
         for index, text in enumerate(texts[:window.qty]):
             # The zebra tag would win over "written", so a written row has only it.
             tags = (("written",) if window.highlight.get(index, 0) > now
                     else self._table_row_tags(index))
+            if index in generated:
+                tags += ("generated",)
             try:
                 tree.item(f"r{index}", tags=tags)
                 tree.set(f"r{index}", "value", text)
@@ -554,7 +632,9 @@ class SlaveMixin(TableUiMixin):
         number = next(n for n in range(1, SLAVE_MAX_WINDOWS + 2) if n not in numbers)
         window = SlaveWindow(window_id, number, **(kwargs or {}))
         self.slave_windows[window_id] = window
+        window.drop_invalid_generators()
         self._slave_sync_areas()
+        self._slave_sync_generators()
         self._slave_build_pane(window, self.slave_grid)
         self._slave_reflow()
         self._slave_mark_changed()
@@ -570,6 +650,7 @@ class SlaveMixin(TableUiMixin):
         if window is None:
             return
         self._slave_sync_areas()
+        self._slave_sync_generators()
         pane = self._slave_panes.pop(window_id, None)
         if pane is not None:
             top = pane.get("toplevel")
@@ -578,11 +659,8 @@ class SlaveMixin(TableUiMixin):
             except tk.TclError:
                 pass
         self._slave_reflow()
-        if not self.slave_windows and not self._slave_loading:
-            self.slave_current_workspace = ""
-            self.slave_workspace_dirty = False
-            self._slave_update_workspace_label()
-            self._schedule_ui_settings_save()
+        if not self.slave_windows:
+            self.slave_workspace.forget()
         else:
             self._slave_mark_changed()
 
@@ -635,7 +713,9 @@ class SlaveMixin(TableUiMixin):
         if changed_area:
             window.reset_counters()
             window.highlight = {}
+            window.drop_invalid_generators()
             self._slave_sync_areas()
+            self._slave_sync_generators()
         self._slave_fill_rows(window)
         self._slave_update_format_state(window)
         self._slave_render_status(window)
@@ -828,6 +908,8 @@ class SlaveMixin(TableUiMixin):
             remove_scale=lambda: self.slave_remove_scale(window_id),
             copy=lambda: self._table_copy_rows(self._slave_panes.get(window_id)),
             set_base=lambda base: self.slave_set_base(window_id, base),
+            extra=(("Valor automático…", lambda: self.slave_edit_generator(window_id)),
+                   ("Parar valor automático", lambda: self.slave_remove_generator(window_id))),
         )
         self._slave_apply_menu_palette()
         self._table_popup(self._slave_row_menu, event)
@@ -887,6 +969,241 @@ class SlaveMixin(TableUiMixin):
         self._slave_render_status(window)
         self._slave_update_apply_state(window_id)
         self._slave_mark_changed()
+
+    # -- automatic values -------------------------------------------------------------------
+    def _slave_sync_generators(self):
+        """Rebuild the running automatic values from the windows' settings."""
+        now = time.monotonic()
+        running = {}
+        for window in self.slave_windows.values():
+            for address, config in window.generators.items():
+                key = (window.window_id, address)
+                current = self._slave_generators.get(key)
+                if current is not None and current[0].config == config:
+                    running[key] = current
+                else:
+                    running[key] = (ValueGenerator(config), now)
+        self._slave_generators = running
+        if running and self._slave_generator_after_id is None:
+            self._slave_generator_after_id = self.after(
+                SLAVE_GENERATOR_TICK_MS, self._slave_generate)
+
+    def slave_generator_registers(self, window, address, value):
+        """Registers (or bit) for an automatic *value* at *address*; None if it does not fit."""
+        if window.bits:
+            return [1 if value else 0]
+        offset, _size, fmt = window.group_of_row(address - window.address)
+        if fmt is None or window.address + offset != address:
+            return None
+        scale = window.scales.get(address)
+        if scale is not None and fmt not in ("hex16", "bin16"):
+            try:
+                value = unscale_value(value, scale)
+            except ValueError:
+                return None
+        if fmt.split("_")[0].startswith("float"):
+            text, fmt_used = repr(float(value)), fmt
+        else:
+            text = str(int(round(value)))
+            fmt_used = "uint16" if fmt in ("hex16", "bin16") else fmt
+        try:
+            return encode_register_value(text, fmt_used)
+        except ValueError:
+            return None
+
+    def _slave_generate(self):
+        """Write the current automatic values into the store and show them."""
+        self._slave_generator_after_id = None
+        if not self._slave_generators or getattr(self, "_closing", False):
+            return
+        now = time.monotonic()
+        changed = set()
+        for (window_id, address), (generator, started) in list(self._slave_generators.items()):
+            window = self.slave_windows.get(window_id)
+            if window is None:
+                continue
+            registers = self.slave_generator_registers(window, address,
+                                                       generator.value(now - started))
+            if registers is None:
+                continue
+            current = self.slave_store.read(window.slave, window.table, address, len(registers))
+            if current != registers:
+                self.slave_store.write(window.slave, window.table, address, registers)
+                changed.add((window.slave, window.table))
+        for slave, table in changed:
+            self._slave_render_table(slave, table)
+        try:
+            self._slave_generator_after_id = self.after(SLAVE_GENERATOR_TICK_MS,
+                                                        self._slave_generate)
+        except tk.TclError:
+            pass
+
+    def slave_set_generator(self, window_id, starts, config):
+        """Set (config) or remove (None) the automatic value of the given addresses."""
+        window = self.slave_windows.get(window_id)
+        if window is None:
+            return
+        for address in starts:
+            if config is None:
+                window.generators.pop(address, None)
+            else:
+                window.generators[address] = dict(config)
+        self._slave_sync_generators()
+        self._slave_render_values(window)
+        self._slave_mark_changed()
+
+    def slave_remove_generator(self, window_id):
+        window = self.slave_windows.get(window_id)
+        if window is None:
+            return False
+        starts = [a for a in self._table_selected_group_starts(
+            window, self._slave_panes.get(window_id)) if a in window.generators]
+        if starts:
+            self.slave_set_generator(window_id, starts, None)
+        return bool(starts)
+
+    def slave_edit_generator(self, window_id):
+        """Dialog: automatic value for the selected values."""
+        window = self.slave_windows.get(window_id)
+        if window is None:
+            return
+        starts = self._table_selected_group_starts(window, self._slave_panes.get(window_id))
+        if not starts:
+            messagebox.showwarning(self.tr("Valor automático"),
+                                   self.tr("Seleciona pelo menos um endereço."))
+            return
+        kinds = BIT_GENERATORS if window.bits else REGISTER_GENERATORS
+        current = window.generators.get(starts[0]) or {
+            "kind": kinds[0], "min": 0, "max": 100, "step": 1, "period_s": 1}
+        labels = [self.tr(GENERATOR_LABELS[k]) for k in kinds]
+
+        dialog, body = self._table_dialog(self.tr("Valor automático"))
+        ttk.Label(body, text=self.trf("Valor automático de {count} valor(es) selecionado(s):",
+                                      count=len(starts))).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        def number_text(value):
+            return f"{value:g}"
+
+        kind_var = tk.StringVar(value=labels[kinds.index(current["kind"])]
+                                if current["kind"] in kinds else labels[0])
+        variables = {
+            "min": tk.StringVar(value=number_text(current.get("min", 0))),
+            "max": tk.StringVar(value=number_text(current.get("max", 100))),
+            "step": tk.StringVar(value=number_text(current.get("step", 1))),
+            "period_s": tk.StringVar(value=number_text(current.get("period_s", 1))),
+        }
+        ttk.Label(body, text=self.tr("Tipo")).grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Combobox(body, values=labels, textvariable=kind_var, width=16,
+                     state="readonly").grid(row=1, column=1, columnspan=3, sticky="w", pady=2)
+        entries = {}
+        for row, column, caption, key in ((2, 0, "Mínimo", "min"), (2, 2, "Máximo", "max"),
+                                          (3, 0, "Passo", "step"), (3, 2, "Período (s)", "period_s")):
+            ttk.Label(body, text=self.tr(caption)).grid(row=row, column=column, sticky="w",
+                                                        padx=(0, 6), pady=2)
+            entries[key] = ttk.Entry(body, width=10, textvariable=variables[key])
+            entries[key].grid(row=row, column=column + 1, sticky="w", padx=(0, 14), pady=2)
+        help_var = tk.StringVar()
+        ttk.Label(body, textvariable=help_var).grid(row=4, column=0, columnspan=4, sticky="w",
+                                                    pady=(6, 2))
+        message_var = tk.StringVar()
+        ttk.Label(body, textvariable=message_var, style="MBS.Master.Error.TLabel").grid(
+            row=5, column=0, columnspan=4, sticky="w")
+        help_texts = {
+            "counter": "Soma o passo em cada período; depois do máximo volta ao mínimo.",
+            "ramp": "Sobe do mínimo ao máximo durante o período e recomeça.",
+            "sine": "Oscila entre o mínimo e o máximo; o período é uma volta completa.",
+            "random": "Um valor ao acaso entre o mínimo e o máximo em cada período.",
+            "toggle": "Alterna entre 0 e 1 em cada período.",
+        }
+        if window.bits:
+            help_texts["random"] = "0 ou 1 ao acaso em cada período."
+
+        def selected_kind():
+            return kinds[labels.index(kind_var.get())]
+
+        def refresh(*_args):
+            kind = selected_kind()
+            for key in ("min", "max"):
+                entries[key].configure(state="disabled" if window.bits else "normal")
+            entries["step"].configure(state="normal" if kind == "counter" else "disabled")
+            help_var.set(self.tr(help_texts[kind]))
+
+        kind_var.trace_add("write", refresh)
+        refresh()
+
+        def accept(_event=None):
+            data = {key: var.get() for key, var in variables.items()}
+            data["kind"] = selected_kind()
+            try:
+                config = validate_generator(data, window.bits)
+            except ValueError as exc:
+                message_var.set(self.tr(str(exc)))
+                return
+            self.slave_set_generator(window_id, starts, config)
+            dialog.destroy()
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=6, column=0, columnspan=4, sticky="e", pady=(8, 0))
+        ttk.Button(buttons, text=self.tr("Aplicar"), command=accept,
+                   style="MBS.Primary.TButton").grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(buttons, text=self.tr("Cancelar"), command=dialog.destroy).grid(row=0, column=1)
+        dialog.bind("<Return>", accept)
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.grab_set()
+
+    # -- opening windows from the Sniffer / Master ------------------------------------------
+    def slave_open_definition(self, definition, port="", baud="", parity="", stopbits=""):
+        """Add a Slave window and show the Slave tab.
+
+        The serial settings (and port) are copied to the Slave connection only
+        when it is not listening and they are valid.
+        """
+        if not self.slave_active:
+            if str(baud) in [str(b) for b in DISCOVERY_BAUD_RATES]:
+                self.slave_baud_var.set(str(baud))
+            if parity in SERIAL_PARITIES:
+                self.slave_parity_var.set(parity)
+            if str(stopbits) in SERIAL_STOP_BITS:
+                self.slave_stop_var.set(str(stopbits))
+            if port and port in tuple(self.slave_port_combo["values"]):
+                self.slave_port_var.set(port)
+        window = self.slave_add_window(definition)
+        try:
+            self.main_notebook.select(self.slave_page)
+        except tk.TclError:
+            pass
+        return window
+
+    def slave_open_from_record(self, record):
+        definition = slave_definition_from_record(record)
+        if definition is None:
+            messagebox.showinfo(
+                self.tr("Abrir no Slave"),
+                self.tr("Esta trama não tem um pedido FC01–FC06/FC15/FC16 com endereço "
+                        "conhecido."),
+            )
+            return None
+        port = "" if getattr(self, "capture_active", False) else self.port_a_var.get().strip()
+        return self.slave_open_definition(
+            definition, port=port, baud=self.baud_var.get(),
+            parity=self.parity_var.get(), stopbits=self.stop_var.get(),
+        )
+
+    def slave_open_from_master(self, master_window):
+        """Simulate the data area of a Master window (same names, formats and scales)."""
+        definition = {
+            "slave": master_window.slave, "table": FC_TABLES[master_window.fc],
+            "address": master_window.address, "qty": master_window.qty,
+            "base": master_window.base, "fmt": master_window.fmt,
+            "title": master_window.title, "names": dict(master_window.names),
+            "formats": dict(master_window.formats),
+            "scales": {a: dict(s) for a, s in master_window.scales.items()},
+        }
+        return self.slave_open_definition(
+            definition, baud=self.master_baud_var.get(),
+            parity=self.master_parity_var.get(), stopbits=self.master_stop_var.get(),
+        )
 
     # -- fault simulation -----------------------------------------------------------------
     def slave_set_fault(self, slave, fault):
@@ -1212,101 +1529,25 @@ class SlaveMixin(TableUiMixin):
                        if slave in used},
         }
 
-    def _slave_update_workspace_label(self):
-        name = self.slave_current_workspace
-        if not name:
-            text = ""
-        elif self.slave_workspace_dirty:
-            text = self.trf("Workspace atual: {name} (alterado)", name=name)
-        else:
-            text = self.trf("Workspace atual: {name}", name=name)
-        self.slave_workspace_var.set(text)
-
     def _slave_mark_changed(self):
-        if getattr(self, "_slave_loading", False):
-            return
-        if self.slave_current_workspace and not self.slave_workspace_dirty:
-            self.slave_workspace_dirty = True
-            self._slave_update_workspace_label()
+        self.slave_workspace.mark_changed()
 
     def _slave_build_workspace_menu(self):
-        self._table_fill_workspace_menu(
-            self.slave_workspace_menu, list_workspaces(get_slave_workspaces_folder()),
-            save=self.slave_save_workspace, open_=self.slave_open_workspace,
-            delete=self.slave_delete_workspace,
-            folder=lambda: self._table_open_folder(get_slave_workspaces_folder()),
-        )
+        self.slave_workspace.fill_menu(self.slave_workspace_menu)
         self._slave_apply_menu_palette()
 
     def slave_save_workspace(self, name=None):
-        if name is None:
-            name = self._table_ask_text(
-                self.tr("Guardar workspace"), self.tr("Nome do workspace"),
-                self.slave_current_workspace or self.tr("Workspace 1"),
-            )
-            if name is None:
-                return False
-        try:
-            name = validate_workspace_name(name)
-        except ValueError as exc:
-            messagebox.showerror(self.tr("Guardar workspace"), self.tr(str(exc)))
-            return False
-        path = workspace_path(name, get_slave_workspaces_folder())
-        if path.exists() and name != self.slave_current_workspace:
-            if not messagebox.askyesno(
-                self.tr("Guardar workspace"),
-                self.trf("Já existe um workspace chamado \"{name}\". Substituir?", name=name),
-            ):
-                return False
-        try:
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(self.slave_workspace_data(), handle, indent=2, ensure_ascii=False)
-        except OSError as exc:
-            messagebox.showerror(self.tr("Guardar workspace"), str(exc))
-            return False
-        self.slave_current_workspace = name
-        self.slave_workspace_dirty = False
-        self._slave_update_workspace_label()
-        self._schedule_ui_settings_save()
-        return True
+        return self.slave_workspace.save(name)
 
     def slave_delete_workspace(self, name, confirm=True):
-        if confirm and not messagebox.askyesno(
-            self.tr("Apagar workspace"),
-            self.trf("Apagar o workspace \"{name}\"?", name=name),
-        ):
-            return False
-        try:
-            workspace_path(name, get_slave_workspaces_folder()).unlink()
-        except OSError as exc:
-            messagebox.showerror(self.tr("Apagar workspace"), str(exc))
-            return False
-        if name == self.slave_current_workspace:
-            self.slave_current_workspace = ""
-            self.slave_workspace_dirty = False
-            self._slave_update_workspace_label()
-            self._schedule_ui_settings_save()
-        return True
+        return self.slave_workspace.delete(name, confirm)
 
     def slave_open_workspace(self, name, quiet=False):
         """Replace the windows and faults with a saved workspace; values restart at 0."""
-        try:
-            with open(workspace_path(name, get_slave_workspaces_folder()),
-                      encoding="utf-8") as handle:
-                data = json.load(handle)
-            if not isinstance(data, dict) or data.get("format") != SLAVE_WORKSPACE_FORMAT:
-                raise ValueError(self.tr("O ficheiro não é um workspace do MBToolkit."))
-        except (OSError, ValueError) as exc:
-            if not quiet:
-                messagebox.showerror(self.tr("Abrir workspace"), str(exc))
-            return False
-        self._slave_loading = True
-        try:
-            return self._slave_load_workspace_data(name, data)
-        finally:
-            self._slave_loading = False
+        return self.slave_workspace.open(name, quiet)
 
-    def _slave_load_workspace_data(self, name, data):
+    def _slave_load_workspace_data(self, data):
+        """Replace windows and faults with those of *data*; returns the invalid count."""
         entries, skipped = [], 0
         for item in data.get("windows", [])[:SLAVE_MAX_WINDOWS]:
             try:
@@ -1337,38 +1578,18 @@ class SlaveMixin(TableUiMixin):
                 continue
         for kwargs in entries:
             self.slave_add_window(kwargs)
-        self.slave_current_workspace = name
-        self.slave_workspace_dirty = False
-        self._slave_update_workspace_label()
-        self._schedule_ui_settings_save()
-        if skipped:
-            messagebox.showwarning(
-                self.tr("Abrir workspace"),
-                self.trf("{count} janela(s) inválida(s) foram ignoradas.", count=skipped),
-            )
-        return True
+        return skipped
 
     def slave_confirm_close(self):
         """Ask to save a changed Slave workspace; False cancels closing."""
-        if not (getattr(self, "slave_current_workspace", "")
-                and getattr(self, "slave_workspace_dirty", False)):
-            return True
-        answer = messagebox.askyesnocancel(
-            self.tr("Workspace"),
-            self.trf("Guardar alterações ao workspace do Slave \"{name}\"?",
-                     name=self.slave_current_workspace),
-        )
-        if answer is None:
-            return False
-        if answer:
-            return self.slave_save_workspace(self.slave_current_workspace)
-        return True
+        workspace = getattr(self, "slave_workspace", None)
+        return workspace is None or workspace.confirm_close()
 
     # -- language / palette / shutdown -----------------------------------------------
     def slave_apply_language(self):
         if not hasattr(self, "slave_windows"):
             return
-        self._slave_update_workspace_label()
+        self.slave_workspace.update_label()
         self._slave_render_stats()
         for window in self.slave_windows.values():
             pane = self._slave_panes.get(window.window_id)
@@ -1398,6 +1619,7 @@ class SlaveMixin(TableUiMixin):
             button.set_dark_mode(dark)
 
     def slave_shutdown(self):
+        self._slave_generators = {}
         engine = getattr(self, "slave_engine", None)
         if engine is not None:
             engine.stop(join_timeout=0.8)

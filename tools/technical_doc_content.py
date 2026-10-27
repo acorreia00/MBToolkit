@@ -121,6 +121,11 @@ Exception, wrong CRC and a probability per request; an active fault is shown in 
 the header of that Slave's windows.</li>
 <li><b>Global busy lock:</b> Sniffer, Finder, Master and Slave never run at the same
 time.</li>
+<li><b>Automatic values</b> (counter, ramp, sine, random; toggle/random for bits) per
+address, and <b>Open in Slave</b> from the Sniffer Traffic table and from a Master
+window.</li>
+<li><b>Shared workspaces:</b> <code>TableWorkspace</code> holds the save / open / delete /
+menu / "(modified)" / close-question logic of both tabs.</li>
 <li><b>Workspaces:</b> the Slave has its own Workspace menu (configuration only, values
 restart at 0) in <code>%APPDATA%\\MBToolkit\\Workspaces\\Slave</code>;
 <code>settings.json</code> gains a validated <code>slave</code> section and the "Slave"
@@ -640,6 +645,20 @@ format and scale (<code>slave_set_value()</code>). Nothing is sent on the bus.</
 <li>Each window counts the requests and exceptions that touched its addresses and shows
 the last request; the connection bar counts requests, responses, exceptions, broadcasts
 and requests for other IDs.</li>
+<li><b>Automatic values:</b> <code>SlaveWindow.generators</code> maps the PDU address
+where a value starts to a <code>validate_generator()</code> setting: counter, ramp
+(sawtooth), sine or random for registers, with minimum and maximum in the units shown
+(format and scale) and a period of 0.1&ndash;3600 s; toggle or random for bits.
+<code>ValueGenerator.value(t)</code> is a function of the elapsed time (random draws one
+value per period). Every <code>SLAVE_GENERATOR_TICK_MS</code> the tab converts the values
+to registers (<code>slave_generator_registers()</code>, inverse scale, rounded for integer
+formats) and writes only what changed into the store; those rows carry the
+<code>generated</code> tag (blue text). They are saved in the workspace and win over
+master writes on the next tick.</li>
+<li><b>Open in Slave:</b> <code>slave_definition_from_record()</code> maps a Traffic record
+to a table and area (FC01&ndash;04 read tables, FC05/15 coils, FC06/16 holding registers);
+<code>slave_open_from_master()</code> copies a Master window's area, names, formats and
+scales.</li>
 <li>The Table field and the window header show the read function code with the table
 name (<code>table_choice_label()</code>: "03 Holding Registers"), like the FC field of
 the Master.</li>
@@ -719,8 +738,8 @@ BOUNDARIES_CHAPTER = ("Known boundaries and extension points", """
 <li>No Modbus TCP transport.</li>
 <li>Master tab: no data logging, conditional colours, charts, Test Center, FC22/23 or
 OLE-style automation.</li>
-<li>Slave tab is phase 1: no FC08/FC22/FC23/FC43, no automatically changing values
-(counters, ramps), no traffic view of its own and no Modbus TCP server.</li>
+<li>Slave tab: no FC08/FC22/FC23/FC43, no traffic view of its own and no Modbus TCP
+server.</li>
 <li>No passive Ethernet packet capture.</li>
 <li>No analog RS485 electrical measurement.</li>
 </ul>
@@ -1044,8 +1063,10 @@ MODULE_INTROS = {'MBToolkit.py': '<b>Application launcher and top-level entry po
  'mb_table_ui.py': '<b>Window-grid code shared by the Master and Slave tabs.</b> '
                    'TableUiMixin builds the window header, the value table with drag '
                    'selection, zebra rows and frame, the right-click menu, the scale and '
-                   'text dialogs, the grid reflow and the Workspace menu; module helpers '
-                   'validate workspace names and list workspace files.',
+                   'text dialogs, the grid reflow and the Workspace menu; TableWorkspace '
+                   'saves, opens and deletes the workspace files of one tab and tracks '
+                   'its open / modified state; module helpers validate workspace names '
+                   'and list workspace files.',
  'tests/test_slave.py': '<b>Slave regression tests.</b> Requests and replies are checked '
                         'against the store, and the real Master and Slave engines talk over '
                         'an in-memory serial link, with adapter echo, foreign traffic, split '
@@ -1518,5 +1539,9 @@ TEST_CLASS_DESCRIPTIONS = {'TimingRegressionTests': 'Protects RTU timing and aut
  'SlaveWindowTests': 'Protects Slave workspace entries, area validation, window overlap '
                      'and the translated fault description.',
  'SlaveSettingsTests': 'Checks the Slave workspace folder and the validated slave section '
-                       'of settings.json.'}
+                       'of settings.json.',
+ 'SlaveGeneratorTests': 'Validates automatic values, checks counter, ramp, sine, toggle '
+                        'and random over time, and their workspace round trip.',
+ 'SlaveOpenFromTrafficTests': 'Checks which Traffic records can open a Slave window and '
+                              'with which table and area.'}
 

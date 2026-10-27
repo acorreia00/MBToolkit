@@ -5,12 +5,14 @@ Both tabs show a grid of windows; each window has a header (name, summary,
 Rename / Pop out / close), a value table with per-address formats, scales,
 names, copy, address base, drag selection and zebra rows, and the tab has a
 Workspace menu. This module holds what is common to both: module helpers
-for workspace files and formats, and ``TableUiMixin`` with the widget code.
+for workspace files and formats, ``TableWorkspace`` (the workspace files and
+state of one tab) and ``TableUiMixin`` with the widget code.
 A "pane" is the dict of widgets of one window; a "window" is its model,
 with ``address``, ``qty``, ``base``, ``fmt``, ``formats``, ``scales`` and
 ``group_of_row()``.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -29,6 +31,9 @@ TABLE_STRIPE_DARK = "#262d34"
 # Rows just written by a remote master (Slave tab).
 TABLE_WRITTEN_LIGHT = "#fff1b8"
 TABLE_WRITTEN_DARK = "#5a4b12"
+# Text of values that change automatically (Slave tab).
+TABLE_GENERATED_LIGHT = "#1d4ed8"
+TABLE_GENERATED_DARK = "#7cc4ff"
 TABLE_MAX_TITLE_LENGTH = 40
 SERIAL_PARITIES = ("None", "Even", "Odd")
 SERIAL_STOP_BITS = ("1", "2")
@@ -133,6 +138,160 @@ def validated_scales(scales):
         except (ValueError, TypeError, IndexError):
             continue
     return result
+
+
+class TableWorkspace:
+    """Named workspace files of one tab (Master or Slave) and their state.
+
+    Holds the name of the open workspace, whether it changed since it was
+    opened or saved (``dirty``) and a ``loading`` guard that suppresses change
+    tracking while a workspace is being loaded. The tab supplies its folder,
+    the accepted ``format`` names (the first is written), a ``data()`` callable
+    that returns the JSON to save and a ``load(data)`` callable that replaces
+    the tab's windows and returns the number of invalid windows skipped.
+    """
+
+    def __init__(self, app, *, folder, formats, data, load, label_var, close_question):
+        self.app = app
+        self.folder = folder
+        self.formats = tuple(formats)
+        self.data = data
+        self.load = load
+        self.label_var = label_var
+        # PT template with {name}, asked when closing the program with changes.
+        self.close_question = close_question
+        self.current = ""
+        self.dirty = False
+        self.loading = False
+
+    def names(self):
+        return list_workspaces(self.folder())
+
+    def path(self, name):
+        return workspace_path(name, self.folder())
+
+    def update_label(self):
+        app = self.app
+        if not self.current:
+            text = ""
+        elif self.dirty:
+            text = app.trf("Workspace atual: {name} (alterado)", name=self.current)
+        else:
+            text = app.trf("Workspace atual: {name}", name=self.current)
+        self.label_var.set(text)
+
+    def _set(self, name, save_settings=True):
+        self.current = name
+        self.dirty = False
+        self.update_label()
+        if save_settings:
+            self.app._schedule_ui_settings_save()
+
+    def mark_changed(self):
+        """Record a change to the open workspace (ignored while loading one)."""
+        if self.loading:
+            return
+        if self.current and not self.dirty:
+            self.dirty = True
+            self.update_label()
+
+    def forget(self):
+        """No workspace open any more (e.g. every window was closed)."""
+        if not self.loading:
+            self._set("")
+
+    def fill_menu(self, menu):
+        self.app._table_fill_workspace_menu(
+            menu, self.names(), save=self.save, open_=self.open, delete=self.delete,
+            folder=lambda: self.app._table_open_folder(self.folder()),
+        )
+
+    def save(self, name=None):
+        """Save the tab under *name* (asked when None); True when saved."""
+        app = self.app
+        if name is None:
+            name = app._table_ask_text(app.tr("Guardar workspace"), app.tr("Nome do workspace"),
+                                       self.current or app.tr("Workspace 1"))
+            if name is None:
+                return False
+        try:
+            name = validate_workspace_name(name)
+        except ValueError as exc:
+            messagebox.showerror(app.tr("Guardar workspace"), app.tr(str(exc)))
+            return False
+        path = self.path(name)
+        if path.exists() and name != self.current:
+            if not messagebox.askyesno(
+                app.tr("Guardar workspace"),
+                app.trf("Já existe um workspace chamado \"{name}\". Substituir?", name=name),
+            ):
+                return False
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(self.data(), handle, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            messagebox.showerror(app.tr("Guardar workspace"), str(exc))
+            return False
+        self._set(name)
+        return True
+
+    def delete(self, name, confirm=True):
+        app = self.app
+        if confirm and not messagebox.askyesno(
+            app.tr("Apagar workspace"), app.trf("Apagar o workspace \"{name}\"?", name=name),
+        ):
+            return False
+        try:
+            self.path(name).unlink()
+        except OSError as exc:
+            messagebox.showerror(app.tr("Apagar workspace"), str(exc))
+            return False
+        if name == self.current:
+            self._set("")
+        return True
+
+    def open(self, name, quiet=False):
+        """Replace the tab's windows with a saved workspace (by name).
+
+        *quiet* (start-up restore) suppresses the error dialog when the file
+        cannot be read.
+        """
+        app = self.app
+        try:
+            with open(self.path(name), encoding="utf-8") as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict) or data.get("format") not in self.formats:
+                raise ValueError(app.tr("O ficheiro não é um workspace do MBToolkit."))
+        except (OSError, ValueError) as exc:
+            if not quiet:
+                messagebox.showerror(app.tr("Abrir workspace"), str(exc))
+            return False
+        self.loading = True
+        try:
+            skipped = self.load(data)
+        finally:
+            self.loading = False
+        self._set(name)
+        if skipped:
+            messagebox.showwarning(
+                app.tr("Abrir workspace"),
+                app.trf("{count} janela(s) inválida(s) foram ignoradas.", count=skipped),
+            )
+        return True
+
+    def confirm_close(self):
+        """Ask to save a changed workspace; False cancels closing the program.
+
+        Windows never saved as a workspace close silently.
+        """
+        if not (self.current and self.dirty):
+            return True
+        app = self.app
+        answer = messagebox.askyesnocancel(
+            app.tr("Workspace"), app.trf(self.close_question, name=self.current))
+        if answer is None:
+            return False
+        return self.save(self.current) if answer else True
 
 
 class TableUiMixin:
@@ -334,6 +493,8 @@ class TableUiMixin:
             tree.tag_configure("stale", foreground=colors["disabled"])
             tree.tag_configure("odd", background=TABLE_STRIPE_DARK if dark
                                else TABLE_STRIPE_LIGHT)
+            tree.tag_configure("generated", foreground=TABLE_GENERATED_DARK if dark
+                               else TABLE_GENERATED_LIGHT)
             # A written row carries only this tag (no zebra "odd" tag).
             tree.tag_configure("written", background=TABLE_WRITTEN_DARK if dark
                                else TABLE_WRITTEN_LIGHT)
@@ -502,8 +663,12 @@ class TableUiMixin:
             self.clipboard_append("\n".join(lines))
 
     def _table_fill_row_menu(self, menu, pane, window, registers, *, set_format,
-                             edit_scale, remove_scale, copy, set_base):
-        """Right-click menu: Formato ▸, Repor, Escala…, Remover escala, Copiar, Base ▸."""
+                             edit_scale, remove_scale, copy, set_base, extra=()):
+        """Right-click menu: Formato ▸, Repor, Escala…, Remover escala, Copiar, Base ▸.
+
+        *extra* adds tab-specific entries (PT label, command) after the scale
+        entries, in their own section.
+        """
         menu.delete(0, "end")
         for child in menu.winfo_children():
             child.destroy()
@@ -522,6 +687,10 @@ class TableUiMixin:
                          command=lambda: set_format(None), state=state)
         menu.add_command(label=self.tr("Escala…"), command=edit_scale, state=state)
         menu.add_command(label=self.tr("Remover escala"), command=remove_scale, state=state)
+        if extra:
+            menu.add_separator()
+            for label, command in extra:
+                menu.add_command(label=self.tr(label), command=command)
         menu.add_separator()
         menu.add_command(label=self.tr("Copiar"), accelerator="Ctrl+C", command=copy)
         menu.add_separator()

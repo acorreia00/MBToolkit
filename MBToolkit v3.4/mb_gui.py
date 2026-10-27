@@ -30,7 +30,7 @@ from mb_slave_finder import SlaveFinderMixin
 from mb_master_ui import MasterMixin
 from mb_slave_ui import SlaveMixin
 from mb_capture import CaptureMixin
-from mb_view import TRAFFIC_MENU_OPEN_IN_MASTER, ViewMixin
+from mb_view import TRAFFIC_MENU_OPEN_IN_MASTER, TRAFFIC_MENU_OPEN_IN_SLAVE, ViewMixin
 from mb_widgets import RefreshButton, ToggleSwitch
 from mb_theme import apply_modern_theme, apply_theme, theme_colors
 from mb_i18n import (
@@ -479,6 +479,7 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
             (5, "Mostrar apenas esta transação"),
             (6, "Limpar filtro de transação"),
             (TRAFFIC_MENU_OPEN_IN_MASTER, "Abrir no Master"),
+            (TRAFFIC_MENU_OPEN_IN_SLAVE, "Abrir no Slave"),
         )
         for index, canonical in labels:
             try:
@@ -736,13 +737,13 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
                     "stop_bits": self.master_stop_var.get(),
                     "response_timeout_ms": self.master_timeout_var.get(),
                     "delay_ms": self.master_delay_var.get(),
-                    "last_workspace": self.master_current_workspace,
+                    "last_workspace": self.master_workspace.current,
                 },
                 "slave": {
                     "baud": self.slave_baud_var.get(),
                     "parity": self.slave_parity_var.get(),
                     "stop_bits": self.slave_stop_var.get(),
-                    "last_workspace": self.slave_current_workspace,
+                    "last_workspace": self.slave_workspace.current,
                 },
             }
             save_ui_settings(settings=payload)
@@ -1690,6 +1691,10 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
             label="Abrir no Master",
             command=self.context_open_selected_in_master,
         )
+        self.traffic_context_menu.add_command(
+            label="Abrir no Slave",
+            command=self.context_open_selected_in_slave,
+        )
 
         ys = ttk.Scrollbar(parsed, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ys.set)
@@ -2439,6 +2444,25 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
             "Renomear, Destacar e ✕ funcionam como no Master.\n"
         )
         h(
+            "Valores automáticos: no clique direito, “Valor automático…” faz os valores "
+            "selecionados mudarem sozinhos, para testar trends e alarmes no SCADA. Nos "
+            "registos: Contador (soma o passo em cada período e volta ao mínimo depois do "
+            "máximo), Rampa (sobe do mínimo ao máximo durante o período), Senoide (oscila "
+            "entre o mínimo e o máximo; o período é uma volta) e Aleatório (um valor ao acaso "
+            "em cada período). Nas Coils e Discrete Inputs: Alternar 0/1 e Aleatório. O "
+            "mínimo e o máximo estão nas unidades mostradas (formato e escala do valor). Os "
+            "valores automáticos aparecem a azul, são guardados no workspace e substituem "
+            "o que o master ou o utilizador escreverem nesses endereços. “Parar valor "
+            "automático” deixa o último valor.\n"
+        )
+        h(
+            "“Abrir no Slave”: no Tráfego do Sniffer (clique direito num pedido FC01–FC06, "
+            "FC15 ou FC16, ou na resposta correspondente) cria uma janela do Slave com o mesmo "
+            "Slave ID, tabela, endereço e quantidade; no Master, o clique direito numa janela "
+            "cria uma janela do Slave com a mesma zona, nomes, formatos e escalas. Os "
+            "parâmetros série são copiados para a ligação do Slave se este não estiver ligado.\n"
+        )
+        h(
             "Simulação de falhas: “Falhas…” configura falhas para o Slave ID da janela, que valem "
             "para todas as janelas desse ID: atraso na resposta (ms), não responder, responder "
             "sempre com uma Exception à escolha (01, 02, 03, 04 ou 06), CRC errado nas respostas "
@@ -2461,7 +2485,7 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
         )
         h(
             "O menu “Workspace” do Slave guarda só a configuração: ligação, janelas, nomes, "
-            "formatos, escalas e falhas. Os valores dos registos não são guardados e voltam a 0 "
+            "formatos, escalas, valores automáticos e falhas. Os valores dos registos não são guardados e voltam a 0 "
             "ao abrir um workspace. Os ficheiros ficam em %APPDATA%\\MBToolkit\\Workspaces\\Slave; o "
             "último workspace do Slave também é reaberto ao arrancar.\n"
         )

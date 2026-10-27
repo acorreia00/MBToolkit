@@ -9,6 +9,7 @@ from pathlib import Path
 
 import mb_config
 import mb_master_ui
+import mb_table_ui
 from mb_master import (
     BYTE_ORDERS,
     BYTE_ORDERS_64,
@@ -351,10 +352,10 @@ class MasterWorkspaceFolderTests(unittest.TestCase):
                          ["armazém", "Linha 1", "Subestação B"])
 
     def test_workspace_names_must_be_valid_file_names(self):
-        self.assertEqual(mb_master_ui.validate_workspace_name("  Linha 1. "), "Linha 1")
+        self.assertEqual(mb_table_ui.validate_workspace_name("  Linha 1. "), "Linha 1")
         for bad in ("", "   ", "a/b", "x:y", "CON", "com3", "a" * 61, 'q"'):
             with self.assertRaises(ValueError):
-                mb_master_ui.validate_workspace_name(bad)
+                mb_table_ui.validate_workspace_name(bad)
 
     def test_mbsniffer_settings_and_workspaces_are_migrated_once(self):
         legacy = Path(self._folder.name) / "MBSniffer"

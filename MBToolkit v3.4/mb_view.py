@@ -31,6 +31,7 @@ from mb_protocol import read_bits_details
 
 # Index of "Abrir no Master" in the Traffic context menu (built in mb_gui.py).
 TRAFFIC_MENU_OPEN_IN_MASTER = 8
+TRAFFIC_MENU_OPEN_IN_SLAVE = 9
 
 
 class ViewMixin:
@@ -525,6 +526,11 @@ class ViewMixin:
         if record is not None:
             self.master_open_from_record(record)
 
+    def context_open_selected_in_slave(self):
+        record = self.selected_record()
+        if record is not None:
+            self.slave_open_from_record(record)
+
     def show_traffic_context_menu(self, event):
         row_iid = self.tree.identify_row(event.y)
         if not row_iid or row_iid not in self._record_by_iid:
@@ -534,14 +540,18 @@ class ViewMixin:
         self.tree.focus(row_iid)
         self.on_row_select()
 
-        opener = getattr(self, "master_definition_from_record", None)
-        if callable(opener):
-            state = "normal" if opener(self._record_by_iid[row_iid]) else "disabled"
-            try:
-                self.traffic_context_menu.entryconfigure(TRAFFIC_MENU_OPEN_IN_MASTER,
-                                                         state=state)
-            except tk.TclError:
-                pass
+        from mb_slave_ui import slave_definition_from_record
+
+        record = self._record_by_iid[row_iid]
+        for index, opener in ((TRAFFIC_MENU_OPEN_IN_MASTER,
+                               getattr(self, "master_definition_from_record", None)),
+                              (TRAFFIC_MENU_OPEN_IN_SLAVE, slave_definition_from_record)):
+            if callable(opener):
+                state = "normal" if opener(record) else "disabled"
+                try:
+                    self.traffic_context_menu.entryconfigure(index, state=state)
+                except tk.TclError:
+                    pass
 
         try:
             self.traffic_context_menu.tk_popup(event.x_root, event.y_root)

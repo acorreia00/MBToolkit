@@ -2955,4 +2955,12 @@ guarda só a configuração; a simulação de falhas entra já na Fase 1, por Sl
 - Campo Tabela do Slave com o código e o nome ("03 Holding Registers"), como o
   campo FC do Master; o cabeçalho das janelas do Master e do Slave mostra o
   código e o nome (`FC03 Read Holding Registers` / `FC03 Holding Registers`).
-- Testes: 88 → 113 (`tests/test_slave.py`, migração da pasta do Master e campo Tabela).
+- Fase 2 do Slave (parte): valores automáticos por endereço (contador, rampa,
+  senoide, aleatório; alternar/aleatório nos bits), a azul e guardados no
+  workspace; "Abrir no Slave" a partir do Tráfego do Sniffer e do clique
+  direito numa janela do Master.
+- Código dos workspaces juntado em `mb_table_ui.TableWorkspace` (guardar,
+  abrir, apagar, menu, "(alterado)", pergunta ao fechar) para o Master e o
+  Slave; comportamento igual.
+- Testes: 88 → 118 (`tests/test_slave.py`, migração da pasta do Master, campo
+  Tabela, valores automáticos e "Abrir no Slave").

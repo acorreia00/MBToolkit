@@ -58,7 +58,7 @@ def prepare_slave_demo(app, app_dir):
 
     sys.path.insert(0, str(app_dir / "tests"))
     from mb_master import MasterEngine, PollDefinition, build_write_request
-    from mb_slave import validate_fault
+    from mb_slave import validate_fault, validate_generator
     from test_slave import BusEnd
 
     import time
@@ -80,6 +80,8 @@ def prepare_slave_demo(app, app_dir):
                           "title": "Inversor 7"})
     app.slave_set_value(holding, 0, "21.5")
     app.slave_set_value(holding, 2, "450")
+    app.slave_set_generator(holding.window_id, [3], validate_generator(
+        {"kind": "sine", "min": 0, "max": 1000, "period_s": 20}))
     app.slave_set_fault(7, validate_fault({"no_response": True, "probability": 20}))
     app.slave_port_var.set("COM4")
     app.slave_safety_var.set(True)

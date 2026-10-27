@@ -401,7 +401,16 @@ Regras:
 - Funções de módulo: `parse_int_field`, `validate_workspace_name`,
   `workspace_path(name, folder)`, `list_workspaces(folder)`,
   `apply_format_to_rows`, `validated_names/formats/scales`.
-  `mb_master_ui.py` reexporta as que os testes do Master usam.
+  `mb_master_ui.py` tem `workspace_path(name)` / `list_workspaces()` presos à
+  pasta do Master.
+- `TableWorkspace`: ficheiros e estado do workspace de um separador (`current`,
+  `dirty`, `loading`) com `save`, `open`, `delete`, `fill_menu`, `mark_changed`,
+  `forget`, `update_label` e `confirm_close`. Cada separador cria um
+  (`master_workspace`, `slave_workspace`) com a pasta, os `format` aceites,
+  `data()` (JSON a guardar) e `load(data)` (substitui as janelas e devolve
+  quantas eram inválidas). `master_save_workspace()` & cia. são só atalhos.
+- `_table_fill_row_menu(..., extra=)` acrescenta entradas próprias do separador
+  ("Valor automático…" no Slave, "Abrir no Slave" no Master).
 - Uma linha escrita pelo master (Slave) tem só a tag `written`: a tag `odd`
   ganharia à cor de destaque.
 
@@ -442,6 +451,24 @@ Regras:
 - Contadores: na barra de ligação pedidos, respostas, exceções, broadcasts e
   pedidos para outros IDs; em cada janela, pedidos e exceções sobre os seus
   endereços e o último pedido.
+- Valores automáticos: `SlaveWindow.generators` (PDU Address do início do
+  valor → `validate_generator()`): registos `counter`, `ramp`, `sine`, `random`
+  com `min`/`max` nas unidades mostradas (formato + escala), `step` no contador
+  e `period_s` 0,1–3600 s (volta completa na rampa/senoide, intervalo nos
+  outros); bits `toggle` e `random`. `ValueGenerator.value(t)` é determinístico
+  em função do tempo (exceto `random`, um valor por período). O separador
+  recalcula tudo a cada `SLAVE_GENERATOR_TICK_MS` (100 ms) na thread do Tk,
+  converte para registos (`slave_generator_registers()`: escala inversa,
+  arredondado nos inteiros; valores fora do formato são ignorados) e escreve no
+  store só o que mudou. Linhas com valor automático têm a tag `generated` (texto
+  azul). Mudar a zona da janela larga os que deixam de caber
+  (`drop_invalid_generators()`). Ficam no workspace; escritas do master nesses
+  endereços são substituídas no tick seguinte.
+- "Abrir no Slave": `slave_definition_from_record()` (FC01–04 → tabela lida,
+  FC05/15 → coils, FC06/16 → holding; REQUEST e respostas de escrita usam o
+  próprio endereço, respostas de leitura o do pedido) e
+  `slave_open_from_master()` (mesma zona, nomes, formatos, escalas e base).
+  Menu do Tráfego: índice `TRAFFIC_MENU_OPEN_IN_SLAVE` (9) em `mb_view.py`.
 - Ligar exige a confirmação de que nenhum equipamento usa os Slave IDs
   simulados (não há verificação de barramento livre: o Slave escuta tráfego de
   outros por natureza). `busy = True` bloqueia Sniffer, Simulação, Finder e
@@ -450,7 +477,8 @@ Regras:
 - Workspace do Slave: menu próprio, ficheiros `.mbsw` em
   `%APPDATA%\MBToolkit\Workspaces\Slave` (`get_slave_workspaces_folder()`),
   `format = "MBToolkit Slave workspace"`, versão 1. Guarda só configuração
-  (ligação, janelas, nomes, formatos, escalas, falhas dos Slave IDs em uso);
+  (ligação, janelas, nomes, formatos, escalas, valores automáticos, falhas dos
+  Slave IDs em uso);
   abrir repõe os valores a 0. `settings.json` → secção `slave` (baud, parity,
   stop, `last_workspace`) e separador "Slave". `slave_confirm_close()` corre em
   `on_close` a seguir ao do Master.

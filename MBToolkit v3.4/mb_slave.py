@@ -9,6 +9,7 @@ against the store and builds the reply, the way a real device would.
 answers them and posts what it did to the application's ``event_queue``.
 """
 
+import math
 import random
 import threading
 import time
@@ -95,6 +96,101 @@ def fault_active(fault):
     """True when the fault settings change how the slave answers."""
     return bool(fault) and bool(fault.get("delay_ms") or fault.get("no_response")
                                 or fault.get("exception") or fault.get("bad_crc"))
+
+
+# ---------------------------------------------------------------------------
+# Automatic values
+# ---------------------------------------------------------------------------
+
+# Register values: counter, ramp (sawtooth), sine and random. Bits (Coils /
+# Discrete Inputs): toggle and random 0/1.
+REGISTER_GENERATORS = ("counter", "ramp", "sine", "random")
+BIT_GENERATORS = ("toggle", "random")
+GENERATOR_MIN_PERIOD_S = 0.1
+GENERATOR_MAX_PERIOD_S = 3600.0
+
+
+def _number(value, message):
+    try:
+        number = float(str(value).strip().replace(",", "."))
+    except ValueError:
+        raise ValueError(message) from None
+    if math.isnan(number) or math.isinf(number):
+        raise ValueError(message)
+    return number
+
+
+def validate_generator(data, bits=False):
+    """Return a clean automatic-value dict; raise ValueError (PT canonical text).
+
+    ``period_s`` is the full cycle of a ramp / sine and the update interval of
+    a counter, random value or toggle. Registers use ``min`` / ``max`` (and
+    ``step`` for a counter) in the units shown in the window.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Valor automático inválido.")
+    kind = data.get("kind")
+    if kind not in (BIT_GENERATORS if bits else REGISTER_GENERATORS):
+        raise ValueError("Tipo de valor automático inválido.")
+    period_s = _number(data.get("period_s", 1), "O período tem de ser um número.")
+    if not GENERATOR_MIN_PERIOD_S <= period_s <= GENERATOR_MAX_PERIOD_S:
+        raise ValueError("O período tem de estar entre 0,1 e 3600 s.")
+    result = {"kind": kind, "period_s": period_s}
+    if bits:
+        return result
+    low = _number(data.get("min", 0), "O mínimo e o máximo têm de ser números.")
+    high = _number(data.get("max", 100), "O mínimo e o máximo têm de ser números.")
+    if low >= high:
+        raise ValueError("O mínimo tem de ser menor que o máximo.")
+    result.update(min=low, max=high)
+    if kind == "counter":
+        step = _number(data.get("step", 1), "O passo tem de ser um número.")
+        if step <= 0:
+            raise ValueError("O passo tem de ser maior que 0.")
+        result["step"] = step
+    return result
+
+
+class ValueGenerator:
+    """Value of one automatic address as a function of the elapsed time.
+
+    Counter, ramp, sine and toggle are deterministic: ``value(t)`` depends only
+    on the seconds since the generator started. A random value changes once
+    per period. Wrapping: a counter returns to ``min`` after ``max``; a ramp
+    rises from ``min`` to ``max`` in one period and starts again.
+    """
+
+    def __init__(self, config, rng=None):
+        self.config = dict(config)
+        self.rng = rng or random.Random()
+        self._random_index = None
+        self._random_value = None
+
+    def value(self, elapsed_s):
+        c = self.config
+        period = c["period_s"]
+        cycles = max(0.0, elapsed_s) / period
+        kind = c["kind"]
+        if kind == "toggle":
+            return int(cycles) % 2
+        if kind == "random":
+            index = int(cycles)
+            if index != self._random_index:
+                self._random_index = index
+                if "min" in c:
+                    self._random_value = self.rng.uniform(c["min"], c["max"])
+                else:
+                    self._random_value = self.rng.randint(0, 1)
+            return self._random_value
+        low, high = c["min"], c["max"]
+        if kind == "ramp":
+            return low + (high - low) * (cycles - math.floor(cycles))
+        if kind == "sine":
+            middle, amplitude = (low + high) / 2.0, (high - low) / 2.0
+            return middle + amplitude * math.sin(2.0 * math.pi * cycles)
+        # counter
+        count = int(math.floor((high - low) / c["step"] + 1e-9)) + 1
+        return low + (int(cycles) % count) * c["step"]
 
 
 # ---------------------------------------------------------------------------

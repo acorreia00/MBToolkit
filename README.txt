@@ -27,6 +27,11 @@ NOVIDADES v3.4
   como no Master. Menu Workspace próprio (só configuração; os valores começam
   a 0), guardado em %APPDATA%\MBToolkit\Workspaces\Slave.
 - Sniffer, Finder, Master e Slave nunca funcionam ao mesmo tempo.
+- Valores automáticos no Slave (clique direito → "Valor automático…"):
+  contador, rampa, senoide e aleatório nos registos; alternar 0/1 e aleatório
+  nas Coils e Discrete Inputs. Aparecem a azul e ficam no workspace.
+- "Abrir no Slave": a partir do Tráfego do Sniffer e do clique direito numa
+  janela do Master.
 - Os workspaces do Master passam para %APPDATA%\MBToolkit\Workspaces\Master
   (movidos automaticamente no primeiro arranque).
 

@@ -22,10 +22,12 @@ from mb_slave import (
     handle_request,
     request_length,
     validate_fault,
+    validate_generator,
+    ValueGenerator,
 )
 import mb_config
 from mb_i18n import LANGUAGE_ENGLISH, translate_text
-from mb_slave_ui import SlaveWindow, fault_parts, validate_area
+from mb_slave_ui import SlaveWindow, fault_parts, slave_definition_from_record, validate_area
 from mb_table_ui import list_workspaces, workspace_path
 
 
@@ -416,6 +418,82 @@ class SlaveWindowTests(unittest.TestCase):
                  for template, values in fault_parts(fault)]
         self.assertEqual(parts, ["no response", "Exception 04", "delay 50 ms"])
         self.assertEqual(translate_text("Falhas…", LANGUAGE_ENGLISH), "Faults…")
+
+
+class SlaveGeneratorTests(unittest.TestCase):
+    def test_validation(self):
+        config = validate_generator({"kind": "counter", "min": "0", "max": "10",
+                                     "step": "2", "period_s": "0,5"})
+        self.assertEqual(config, {"kind": "counter", "period_s": 0.5, "min": 0.0,
+                                  "max": 10.0, "step": 2.0})
+        self.assertEqual(validate_generator({"kind": "toggle", "period_s": 2}, bits=True),
+                         {"kind": "toggle", "period_s": 2.0})
+        for bad, bits in (({"kind": "sine", "min": 5, "max": 5}, False),
+                          ({"kind": "ramp", "period_s": 0.05}, False),
+                          ({"kind": "ramp", "period_s": 4000}, False),
+                          ({"kind": "counter", "step": 0}, False),
+                          ({"kind": "toggle"}, False),
+                          ({"kind": "sine"}, True),
+                          ({"kind": "random", "min": "x"}, False)):
+            with self.assertRaises(ValueError):
+                validate_generator(bad, bits)
+
+    def test_values_over_time(self):
+        counter = ValueGenerator(validate_generator(
+            {"kind": "counter", "min": 0, "max": 3, "step": 1, "period_s": 1}))
+        self.assertEqual([counter.value(t) for t in (0, 1.2, 2.5, 3.1, 4.0)], [0, 1, 2, 3, 0])
+        ramp = ValueGenerator(validate_generator(
+            {"kind": "ramp", "min": 10, "max": 20, "period_s": 10}))
+        self.assertAlmostEqual(ramp.value(5), 15)
+        self.assertAlmostEqual(ramp.value(12.5), 12.5)
+        sine = ValueGenerator(validate_generator(
+            {"kind": "sine", "min": -1, "max": 1, "period_s": 4}))
+        self.assertAlmostEqual(sine.value(1), 1)
+        self.assertAlmostEqual(sine.value(3), -1)
+        toggle = ValueGenerator(validate_generator({"kind": "toggle", "period_s": 1}, True))
+        self.assertEqual([toggle.value(t) for t in (0.5, 1.5, 2.5)], [0, 1, 0])
+        noise = ValueGenerator(validate_generator(
+            {"kind": "random", "min": 5, "max": 6, "period_s": 1}), random.Random(3))
+        first = noise.value(0.1)
+        self.assertTrue(5 <= first <= 6)
+        self.assertEqual(noise.value(0.9), first)  # one value per period
+        bits = ValueGenerator(validate_generator({"kind": "random", "period_s": 1}, True),
+                              random.Random(3))
+        self.assertIn(bits.value(0), (0, 1))
+
+    def test_generators_are_saved_and_follow_the_window(self):
+        window = SlaveWindow(1, 1, table="holding", address=0, qty=4, generators={
+            2: {"kind": "sine", "min": 0, "max": 10, "period_s": 5}})
+        data = SlaveWindow.validated_kwargs(window.to_json())
+        self.assertEqual(data["generators"][2]["kind"], "sine")
+        bad = window.to_json()
+        bad["generators"]["3"] = {"kind": "toggle"}
+        self.assertEqual(list(SlaveWindow.validated_kwargs(bad)["generators"]), [2])
+        window.qty = 2  # address 2 is no longer in the window
+        window.drop_invalid_generators()
+        self.assertEqual(window.generators, {})
+
+
+class SlaveOpenFromTrafficTests(unittest.TestCase):
+    def test_reads_and_writes_give_the_slave_area(self):
+        request = {"type": "REQUEST", "slave": "5", "fc": "03", "pdu_address": 100, "qty": 4}
+        self.assertEqual(slave_definition_from_record(request),
+                         {"slave": 5, "table": "holding", "address": 100, "qty": 4})
+        response = {"type": "RESPONSE", "slave": "5", "fc": "04",
+                    "request_pdu_address": 7, "request_qty": 2}
+        self.assertEqual(slave_definition_from_record(response)["table"], "input")
+        coil = {"type": "REQUEST", "slave": "2", "fc": "05", "pdu_address": 9, "qty": None}
+        self.assertEqual(slave_definition_from_record(coil),
+                         {"slave": 2, "table": "coils", "address": 9, "qty": 1})
+        echo = {"type": "RESPONSE", "slave": "2", "fc": "10", "pdu_address": 0, "qty": 3}
+        self.assertEqual(slave_definition_from_record(echo)["table"], "holding")
+
+    def test_frames_without_an_area_are_refused(self):
+        for record in ({"type": "REQUEST", "slave": "0", "fc": "06", "pdu_address": 1},
+                       {"type": "REQUEST", "slave": "1", "fc": "08", "pdu_address": 0, "qty": 1},
+                       {"type": "RESPONSE", "slave": "1", "fc": "03"},
+                       {"type": "RAW", "slave": "", "fc": ""}):
+            self.assertIsNone(slave_definition_from_record(record))
 
 
 class SlaveSettingsTests(unittest.TestCase):

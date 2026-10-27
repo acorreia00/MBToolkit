@@ -6,7 +6,6 @@ widgets. Each poll window has a model (``MasterWindow``) and a pane that can
 sit in the tab's grid or be popped out into its own top-level window.
 """
 
-import json
 import time
 import tkinter as tk
 from tkinter import font as tkfont
@@ -57,9 +56,9 @@ from mb_table_ui import (
     TABLE_PANE_MIN_ROWS,
     TABLE_PANE_MIN_WIDTH,
     TableUiMixin,
+    TableWorkspace,
     apply_format_to_rows,
     parse_int_field,
-    validate_workspace_name,
     validated_formats,
     validated_names,
     validated_scales,
@@ -203,11 +202,6 @@ class MasterMixin(TableUiMixin):
         self.master_serial = None
         self.master_active = False
         self._master_reflow_after_id = None
-        # Workspace state: name of the open workspace, whether it changed since
-        # it was opened/saved, and a guard that suppresses change tracking
-        # while a workspace is being loaded.
-        self.master_workspace_dirty = False
-        self._master_loading = False
 
         page.columnconfigure(0, weight=1)
         page.rowconfigure(2, weight=1)
@@ -302,8 +296,12 @@ class MasterMixin(TableUiMixin):
         self.master_workspace_var = tk.StringVar(value="")
         ttk.Label(toolbar, textvariable=self.master_workspace_var).grid(
             row=0, column=2, padx=(0, 6))
-        self.master_current_workspace = ""
-        self._master_update_workspace_label()
+        self.master_workspace = TableWorkspace(
+            self, folder=get_master_workspaces_folder,
+            formats=MASTER_WORKSPACE_FORMATS, data=self.master_workspace_data,
+            load=self._master_load_workspace_data, label_var=self.master_workspace_var,
+            close_question="Guardar alterações ao workspace \"{name}\"?",
+        )
         title_font = tkfont.nametofont("TkDefaultFont").copy()
         title_font.configure(weight="bold")
         self._master_title_font = title_font
@@ -338,12 +336,10 @@ class MasterMixin(TableUiMixin):
             self.after(10, lambda: self._master_restore_workspace(last))
         else:
             self.master_add_window()
-            self.master_workspace_dirty = False
 
     def _master_restore_workspace(self, name):
         if not self.master_open_workspace(name, quiet=True):
             self.master_add_window()
-            self.master_workspace_dirty = False
 
     # -- helpers ---------------------------------------------------------------
     def _master_install_wheel_tags(self, root_widget):
@@ -595,12 +591,9 @@ class MasterMixin(TableUiMixin):
             except tk.TclError:
                 pass
         self._master_reflow()
-        if not self.master_windows and not self._master_loading:
+        if not self.master_windows:
             # Closing every window leaves no workspace open.
-            self.master_current_workspace = ""
-            self.master_workspace_dirty = False
-            self._master_update_workspace_label()
-            self._schedule_ui_settings_save()
+            self.master_workspace.forget()
         else:
             self._master_mark_changed()
 
@@ -1106,109 +1099,25 @@ class MasterMixin(TableUiMixin):
                                                      key=lambda w: w.number)],
         }
 
-    def _master_update_workspace_label(self):
-        name = getattr(self, "master_current_workspace", "")
-        if not name:
-            text = ""
-        elif getattr(self, "master_workspace_dirty", False):
-            text = self.trf("Workspace atual: {name} (alterado)", name=name)
-        else:
-            text = self.trf("Workspace atual: {name}", name=name)
-        self.master_workspace_var.set(text)
-
     def _master_mark_changed(self):
-        """Record a change to the open workspace (ignored while loading one)."""
-        if getattr(self, "_master_loading", False):
-            return
-        if self.master_current_workspace and not self.master_workspace_dirty:
-            self.master_workspace_dirty = True
-            self._master_update_workspace_label()
+        self.master_workspace.mark_changed()
 
     def _master_build_workspace_menu(self):
         """Rebuild the Workspace menu from the files in the workspace folder."""
-        self._table_fill_workspace_menu(
-            self.master_workspace_menu, list_workspaces(),
-            save=self.master_save_workspace, open_=self.master_open_workspace,
-            delete=self.master_delete_workspace, folder=self.master_open_workspace_folder,
-        )
+        self.master_workspace.fill_menu(self.master_workspace_menu)
         self._master_apply_menu_palette()
 
     def master_save_workspace(self, name=None):
-        """Save all windows as a named workspace in the workspace folder."""
-        if name is None:
-            name = self._table_ask_text(
-                self.tr("Guardar workspace"), self.tr("Nome do workspace"),
-                self.master_current_workspace or self.tr("Workspace 1"),
-            )
-            if name is None:
-                return False
-        try:
-            name = validate_workspace_name(name)
-        except ValueError as exc:
-            messagebox.showerror(self.tr("Guardar workspace"), self.tr(str(exc)))
-            return False
-        path = workspace_path(name)
-        if path.exists() and name != self.master_current_workspace:
-            if not messagebox.askyesno(
-                self.tr("Guardar workspace"),
-                self.trf("Já existe um workspace chamado \"{name}\". Substituir?", name=name),
-            ):
-                return False
-        try:
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(self.master_workspace_data(), handle, indent=2, ensure_ascii=False)
-        except OSError as exc:
-            messagebox.showerror(self.tr("Guardar workspace"), str(exc))
-            return False
-        self.master_current_workspace = name
-        self.master_workspace_dirty = False
-        self._master_update_workspace_label()
-        self._schedule_ui_settings_save()
-        return True
+        return self.master_workspace.save(name)
 
     def master_delete_workspace(self, name, confirm=True):
-        if confirm and not messagebox.askyesno(
-            self.tr("Apagar workspace"),
-            self.trf("Apagar o workspace \"{name}\"?", name=name),
-        ):
-            return False
-        try:
-            workspace_path(name).unlink()
-        except OSError as exc:
-            messagebox.showerror(self.tr("Apagar workspace"), str(exc))
-            return False
-        if name == self.master_current_workspace:
-            self.master_current_workspace = ""
-            self.master_workspace_dirty = False
-            self._master_update_workspace_label()
-            self._schedule_ui_settings_save()
-        return True
-
-    def master_open_workspace_folder(self):
-        self._table_open_folder(get_master_workspaces_folder())
+        return self.master_workspace.delete(name, confirm)
 
     def master_open_workspace(self, name, quiet=False):
-        """Replace the current windows with a saved workspace (by name).
+        return self.master_workspace.open(name, quiet)
 
-        *quiet* (start-up restore) suppresses the error dialog when the file
-        cannot be read.
-        """
-        try:
-            with open(workspace_path(name), encoding="utf-8") as handle:
-                data = json.load(handle)
-            if not isinstance(data, dict) or data.get("format") not in MASTER_WORKSPACE_FORMATS:
-                raise ValueError(self.tr("O ficheiro não é um workspace do MBToolkit."))
-        except (OSError, ValueError) as exc:
-            if not quiet:
-                messagebox.showerror(self.tr("Abrir workspace"), str(exc))
-            return False
-        self._master_loading = True
-        try:
-            return self._master_load_workspace_data(name, data)
-        finally:
-            self._master_loading = False
-
-    def _master_load_workspace_data(self, name, data):
+    def _master_load_workspace_data(self, data):
+        """Replace the windows with those of *data*; returns the invalid count."""
         entries, skipped = [], 0
         for item in data.get("windows", [])[:MASTER_MAX_WINDOWS]:
             try:
@@ -1234,16 +1143,7 @@ class MasterMixin(TableUiMixin):
                 self.master_port_var.set(connection["port"])
         for kwargs in entries:
             self.master_add_window(kwargs)
-        self.master_current_workspace = name
-        self.master_workspace_dirty = False
-        self._master_update_workspace_label()
-        self._schedule_ui_settings_save()
-        if skipped:
-            messagebox.showwarning(
-                self.tr("Abrir workspace"),
-                self.trf("{count} janela(s) inválida(s) foram ignoradas.", count=skipped),
-            )
-        return True
+        return skipped
 
     # -- window rename ---------------------------------------------------------------
     def master_rename_window(self, window_id, name=None):
@@ -1319,6 +1219,8 @@ class MasterMixin(TableUiMixin):
             remove_scale=lambda: self.master_remove_scale(window_id),
             copy=lambda: self.master_copy_rows(window_id),
             set_base=lambda base: self.master_set_base(window_id, base),
+            extra=(("Abrir no Slave", lambda: self.slave_open_from_master(window)),)
+            if hasattr(self, "slave_open_from_master") else (),
         )
         self._master_apply_menu_palette()
         self._table_popup(self._master_row_menu, event)
@@ -1454,29 +1356,15 @@ class MasterMixin(TableUiMixin):
 
     # -- closing the application ------------------------------------------------------
     def master_confirm_close(self):
-        """Ask to save a changed workspace; False cancels closing the application.
-
-        Plain windows that were never saved as a workspace close silently.
-        """
-        if not (getattr(self, "master_current_workspace", "")
-                and getattr(self, "master_workspace_dirty", False)):
-            return True
-        answer = messagebox.askyesnocancel(
-            self.tr("Workspace"),
-            self.trf("Guardar alterações ao workspace \"{name}\"?",
-                     name=self.master_current_workspace),
-        )
-        if answer is None:
-            return False
-        if answer:
-            return self.master_save_workspace(self.master_current_workspace)
-        return True
+        """Ask to save a changed workspace; False cancels closing the application."""
+        workspace = getattr(self, "master_workspace", None)
+        return workspace is None or workspace.confirm_close()
 
     # -- language / palette / shutdown -----------------------------------------------
     def master_apply_language(self):
         if not hasattr(self, "master_windows"):
             return
-        self._master_update_workspace_label()
+        self.master_workspace.update_label()
         for window in self.master_windows.values():
             pane = self._master_panes.get(window.window_id)
             if pane is None:

@@ -18,7 +18,7 @@
 - Registo completo das capturas reais em TXT;
 - **Bus Slave Finder** para pesquisa ativa de Slave IDs, com tentativas configuráveis, Device Identification (FC43/14) opcional, aviso de segurança e verificação automática de barramento livre;
 - **Master** com várias janelas (uma por Slave ou zona de memória): leitura cíclica FC01–FC04, escrita FC05/06/15/16, formatos de 16, 32 e 64 bits (incluindo float e double, nas 4 ordens de bytes) também por endereço, escala para unidades de engenharia, contadores e erros por janela, janelas com nome próprio e destacáveis, workspaces guardados num menu, "Abrir no Master" a partir do Sniffer e do Finder e religação automática da porta;
-- **Slave** (simulador) com vários Slave IDs e tabelas (Coils, Discrete Inputs, Holding e Input Registers) que respondem a um master real em FC01–FC06/15/16, com exceções como num equipamento real, edição de valores, destaque das escritas do master e simulação de falhas por Slave ID (atraso, sem resposta, Exception, CRC errado, probabilidade);
+- **Slave** (simulador) com vários Slave IDs e tabelas (Coils, Discrete Inputs, Holding e Input Registers) que respondem a um master real em FC01–FC06/15/16, com exceções como num equipamento real, edição de valores, destaque das escritas do master, valores automáticos (contador, rampa, senoide, aleatório, alternar), "Abrir no Slave" a partir do Sniffer e do Master e simulação de falhas por Slave ID (atraso, sem resposta, Exception, CRC errado, probabilidade);
 - Interface em **Português** e **English**, selecionável em tempo real;
 - Modos claro e escuro com preferências persistentes.
 

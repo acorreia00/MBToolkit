@@ -18,7 +18,7 @@
 - Complete TXT logging for real capture sessions;
 - **Bus Slave Finder** for active Slave ID discovery, with configurable retries, optional Device Identification (FC43/14), a safety warning and an automatic idle-bus check;
 - **Master** with several windows (one per Slave or data area): cyclic FC01–FC04 reads, FC05/06/15/16 writes, 16, 32 and 64-bit formats (including float and double, in the 4 byte orders), also per address, scaling to engineering units, per-window counters and errors, named pop-out windows workspaces saved in a menu, "Open in Master" from the Sniffer and the Finder and automatic port reconnection;
-- **Slave** (simulator) with several Slave IDs and tables (Coils, Discrete Inputs, Holding and Input Registers) answering a real master on FC01–FC06/15/16, with exceptions like a real device, value editing, highlighted master writes and fault simulation per Slave ID (delay, no response, Exception, wrong CRC, probability);
+- **Slave** (simulator) with several Slave IDs and tables (Coils, Discrete Inputs, Holding and Input Registers) answering a real master on FC01–FC06/15/16, with exceptions like a real device, value editing, highlighted master writes, automatic values (counter, ramp, sine, random, toggle), "Open in Slave" from the Sniffer and the Master and fault simulation per Slave ID (delay, no response, Exception, wrong CRC, probability);
 - Runtime **Português / English** interface selection;
 - Light and Dark modes with persistent preferences.
 

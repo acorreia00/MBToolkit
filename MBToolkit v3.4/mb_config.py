@@ -80,6 +80,9 @@ SLAVE_MAX_QTY = 2000
 # A master write is shown highlighted in the table for this long.
 SLAVE_HIGHLIGHT_SECONDS = 1.5
 SLAVE_FAULT_MAX_DELAY_MS = 10000
+# Automatic values (counter, ramp, sine, random, toggle) are recomputed at
+# this interval.
+SLAVE_GENERATOR_TICK_MS = 100
 # Bytes that do not form a request (other devices' responses, noise) are
 # discarded once the bus has been silent this long. Long enough for the
 # latency-timer chunks of USB-serial adapters (FTDI default 16 ms).
