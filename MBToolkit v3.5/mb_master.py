@@ -478,13 +478,18 @@ class MasterEngine:
     driver failure does not end the session: the engine closes the port, posts
     ``master_reconnecting`` and retries every MASTER_RECONNECT_INTERVAL_SECONDS
     until the port opens again (``master_reconnected``) or the engine stops.
+
+    Events are named ``<event_prefix>_ready``, ``_result``, ... so a subclass
+    serving another tab (the Modbus TCP Client) posts its own events.
     """
 
     def __init__(self, ser, event_queue, *, baud, parity, stopbits,
                  response_timeout_ms, delay_ms, serial_module=None,
                  idle_check_seconds=0.0, reopen=None,
-                 reconnect_interval_s=MASTER_RECONNECT_INTERVAL_SECONDS):
+                 reconnect_interval_s=MASTER_RECONNECT_INTERVAL_SECONDS,
+                 event_prefix="master"):
         self.ser = ser
+        self.event_prefix = event_prefix
         self.reopen = reopen
         self.reconnect_interval_s = float(reconnect_interval_s)
         self.event_queue = event_queue
@@ -578,7 +583,7 @@ class MasterEngine:
                 if traffic:
                     error = ("traffic", hex_bytes(traffic[:16]), len(traffic))
                     return
-            self.event_queue.put(("master_ready", None))
+            self.event_queue.put((f"{self.event_prefix}_ready", None))
 
             while not self.stop_event.is_set():
                 try:
@@ -596,7 +601,7 @@ class MasterEngine:
             if not self.stop_event.is_set():
                 error = ("serial", f"{type(exc).__name__}: {exc}", 0)
         finally:
-            self.event_queue.put(("master_stopped", {"error": error}))
+            self.event_queue.put((f"{self.event_prefix}_stopped", {"error": error}))
 
     def _serve_jobs(self):
         """Serve writes / reads until stopped; serial errors propagate."""
@@ -609,16 +614,16 @@ class MasterEngine:
 
             if job[0] == "write":
                 window_id, request, description = job[1]
-                result = self.transact(request)
+                result = self.transact_for(window_id, request)
                 result.update(kind="write", window_id=window_id, description=description)
             else:
                 definition, once = job[1], job[2]
-                result = self.transact(definition.request())
+                result = self.transact_for(definition.window_id, definition.request())
                 result.update(kind="read", window_id=definition.window_id, once=once,
                               fc=definition.fc, address=definition.address)
             if self.stop_event.is_set():
                 return
-            self.event_queue.put(("master_result", result))
+            self.event_queue.put((f"{self.event_prefix}_result", result))
             if self.stop_event.wait(self.delay_s):
                 return
 
@@ -628,16 +633,20 @@ class MasterEngine:
             self.ser.close()
         except Exception:
             pass
-        self.event_queue.put(("master_reconnecting", {"error": detail}))
+        self.event_queue.put((f"{self.event_prefix}_reconnecting", {"error": detail}))
         while not self.stop_event.wait(self.reconnect_interval_s):
             try:
                 ser = self.reopen()
             except Exception:
                 continue
             self.ser = ser
-            self.event_queue.put(("master_reconnected", None))
+            self.event_queue.put((f"{self.event_prefix}_reconnected", None))
             return True
         return False
+
+    def transact_for(self, window_id, request):
+        """Transact *request* for a window (the TCP Client picks its device here)."""
+        return self.transact(request)
 
     def transact(self, request):
         """Send one request and wait for its response (no wait for broadcast)."""

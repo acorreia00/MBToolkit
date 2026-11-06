@@ -777,6 +777,13 @@ class CaptureMixin:
                 elif event.startswith("slave_"):
                     self.handle_slave_event(event, payload)
 
+                elif event.startswith("client_"):
+                    self.client_tab.handle_master_event(
+                        "master_" + event[len("client_"):], payload)
+
+                elif event.startswith("server_"):
+                    self.server_tab.handle_server_event(event, payload)
+
             flush_frames()
 
             if self.metrics.expire_pending(time.time()):
@@ -838,8 +845,10 @@ class CaptureMixin:
 
         # A changed Master / Slave workspace may be saved first; "Cancel"
         # keeps the application open.
-        for name in ("master_confirm_close", "slave_confirm_close"):
-            confirm = getattr(self, name, None)
+        for tab, name in ((self, "master_confirm_close"), (self, "slave_confirm_close"),
+                          (getattr(self, "client_tab", None), "master_confirm_close"),
+                          (getattr(self, "server_tab", None), "slave_confirm_close")):
+            confirm = getattr(tab, name, None) if tab is not None else None
             if callable(confirm) and not confirm():
                 return
 
@@ -859,8 +868,10 @@ class CaptureMixin:
         # Cancel driver I/O before joining workers so shutdown is not held up
         # by a serial read/write timeout.
         cancel_serial_io(self.discovery_serial)
-        for name in ("master_shutdown", "slave_shutdown"):
-            stopper = getattr(self, name, None)
+        for tab, name in ((self, "master_shutdown"), (self, "slave_shutdown"),
+                          (getattr(self, "client_tab", None), "master_shutdown"),
+                          (getattr(self, "server_tab", None), "slave_shutdown")):
+            stopper = getattr(tab, name, None) if tab is not None else None
             if callable(stopper):
                 stopper()
 

@@ -1,15 +1,31 @@
-MBTOOLKIT v3.4
+MBTOOLKIT v3.5
 ================
 
-MBToolkit é uma ferramenta Windows para diagnóstico de Modbus RTU.
+MBToolkit é uma ferramenta Windows para diagnóstico de Modbus RTU e Modbus TCP.
 
 - Sniffer: passivo; não transmite dados.
 - Bus Slave Finder: ativo; transmite pedidos Modbus RTU de leitura.
 - Master: ativo; lê e escreve valores como master Modbus RTU.
 - Slave: ativo; simula equipamentos Modbus RTU e responde a um master real.
+- Client: lê e escreve equipamentos Modbus TCP (como o Master, em rede).
+- Server: simula equipamentos Modbus TCP (como o Slave, em rede).
 
-NOVIDADES v3.4
+NOVIDADES v3.5
 --------------
+- Novos separadores Client e Server para Modbus TCP, com as mesmas janelas,
+  formatos, escala, nomes, escrita, falhas, valores automáticos e workspaces
+  do Master e do Slave.
+- Client: IP, porta e Unit ID (0–255) em cada janela; uma ligação por
+  equipamento, que volta a ligar se cair; "Sem ligação" quando o equipamento
+  não aceita a ligação. "Abrir no Server" no clique direito.
+- Server: escuta só neste PC por defeito; pode escolher-se uma interface de
+  rede (com IP e nome) ou todas, com confirmação. Vários clientes ao mesmo
+  tempo; Unit ID não simulado → Exception 0B.
+- Client e Server não usam a porta série: funcionam ao mesmo tempo que o
+  Sniffer, o Finder, o Master e o Slave.
+- Workspaces em %APPDATA%\MBToolkit\Workspaces\Client e \Server.
+
+BASE FUNCIONAL DA v3.4
 - Novo separador Slave: o MBToolkit faz de um ou mais equipamentos Modbus RTU
   e responde aos pedidos de um master real (PLC, SCADA, Modbus Poll).
 - Cada janela é uma tabela de um Slave simulado: Slave ID, Coils, Discrete
@@ -371,7 +387,7 @@ BUILD DO EXE
 ------------
 Executar:
 
-    MBToolkit v3.4\build_exe.bat
+    MBToolkit v3.5\build_exe.bat
 
 Antes do build, os testes de regressão são executados automaticamente. Se algum teste falhar, o build é cancelado.
 
@@ -383,7 +399,7 @@ TESTES DE REGRESSÃO
 -------------------
 Podem ser executados manualmente através de:
 
-    MBToolkit v3.4\run_tests.bat
+    MBToolkit v3.5\run_tests.bat
 
 A suite verifica CRC, parser/ressincronização, Function Codes suportados, pairing, broadcast, escritas FC05/FC06, frames partidos, timeouts, frame gap Auto, Bus Slave Finder (tentativas e barramento livre), Device Identification FC43/14 e traduções.
 

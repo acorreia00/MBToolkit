@@ -2964,3 +2964,28 @@ guarda só a configuração; a simulação de falhas entra já na Fase 1, por Sl
   Slave; comportamento igual.
 - Testes: 88 → 118 (`tests/test_slave.py`, migração da pasta do Master, campo
   Tabela, valores automáticos e "Abrir no Slave").
+
+
+---
+
+# v3.5 — Modbus TCP: separadores Client e Server
+
+Versão aumentada de `3.4` para `3.5` a pedido do utilizador. Decisões: separadores
+próprios "Client" e "Server"; tudo numa versão; TCP independente do bloqueio da
+porta série; Server à escuta só neste PC por defeito, com escolha da interface de
+rede e confirmação. Sniffer e Bus Slave Finder ficam só em RTU.
+
+- `mb_tcp.py`: envelope MBAP, `ServerEngine` (vários clientes com `selectors`,
+  Exception 0B para Unit IDs não simulados, falhas por Unit ID com atraso
+  agendado e cabeçalho MBAP inválido), `ClientEngine` (escalonador do Master,
+  uma ligação por equipamento, religação, "Sem ligação") e
+  `list_ipv4_interfaces()`.
+- `mb_tcp_ui.py`: `ClientTab` e `ServerTab`, segundas instâncias do Master e do
+  Slave sobre `TabInstance`. Janelas, escrita, formatos, escala, nomes, falhas,
+  valores automáticos e workspaces reutilizados sem duplicar código.
+- Master/Slave: atributos de classe e métodos de ligação separados para o TCP os
+  substituir; `MasterEngine` com `event_prefix` e `transact_for()`; janelas com
+  linha opcional IP/Porta; "Abrir no Server" no Client.
+- Settings `client` / `server`, pastas `Workspaces\Client` e `\Server`.
+- Ajuda PT/EN, README, notas (secção 16), PDF com capítulo Modbus TCP.
+- Testes: 118 → 132 (`tests/test_tcp.py`).

@@ -23,7 +23,6 @@ from mb_config import (
     MASTER_MAX_WINDOWS,
     MASTER_MIN_DELAY_MS,
     MASTER_MIN_RESPONSE_TIMEOUT_MS,
-    MASTER_WORKSPACE_FORMAT,
     MASTER_WORKSPACE_FORMATS,
     MASTER_WORKSPACE_VERSION,
     MODBUS_EXCEPTION_CODES,
@@ -187,11 +186,36 @@ class MasterWindow:
 
 
 class MasterMixin(TableUiMixin):
-    """Master (poll) tab GUI."""
+    """Master (poll) tab GUI.
+
+    The class attributes below describe this tab. The Modbus TCP Client tab
+    (``mb_tcp_ui.ClientTab``) is a second instance of this mixin with its own
+    state; it overrides them and the connection-specific methods
+    (``_master_build_connection``, ``master_connect``, ...).
+    """
+
+    _master_tab_name = "Master"
+    _master_settings_key = "master"
+    _master_page_attr = "master_page"
+    _master_wheel_tag = MASTER_WHEEL_TAG
+    _master_window_class = MasterWindow
+    _master_ws_folder = staticmethod(get_master_workspaces_folder)
+    _master_ws_formats = MASTER_WORKSPACE_FORMATS
+    _master_ws_close_question = "Guardar alterações ao workspace \"{name}\"?"
+    # Caption, range and range message of the Slave field of the windows.
+    _master_id_label = "Slave"
+    _master_id_range = (1, 247)
+    _master_id_message = "O Slave ID de leitura tem de estar entre 1 e 247."
+    _master_write_id_label = "Slave (0 = broadcast)"
+    _master_write_id_range = (0, 247)
+    _master_connect_first = "Liga primeiro o Master."
+    # Row menu entry that opens the window's area in the simulator tab:
+    # (PT caption, name of the method on the application).
+    _master_open_in_slave = ("Abrir no Slave", "slave_open_from_master")
 
     # -- construction ----------------------------------------------------------
     def build_master_tab(self, page):
-        saved = getattr(self, "ui_settings", {}).get("master", {})
+        saved = getattr(self, "ui_settings", {}).get(self._master_settings_key, {})
         if not isinstance(saved, dict):
             saved = {}
 
@@ -206,6 +230,63 @@ class MasterMixin(TableUiMixin):
         page.columnconfigure(0, weight=1)
         page.rowconfigure(2, weight=1)
 
+        self._master_build_connection(page, saved)
+
+        toolbar = ttk.Frame(page)
+        toolbar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+        toolbar.columnconfigure(3, weight=1)
+        ttk.Button(toolbar, text="Nova janela", command=self.master_add_window).grid(
+            row=0, column=0, padx=(0, 6))
+        # Workspace menu: the saved workspaces are listed directly in it.
+        self.master_workspace_btn = ttk.Menubutton(toolbar, text="Workspace")
+        self.master_workspace_btn.grid(row=0, column=1, padx=(0, 6))
+        self.master_workspace_menu = tk.Menu(
+            self.master_workspace_btn, tearoff=False,
+            postcommand=self._master_build_workspace_menu,
+        )
+        self.master_workspace_btn.configure(menu=self.master_workspace_menu)
+        self.master_workspace_var = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self.master_workspace_var).grid(
+            row=0, column=2, padx=(0, 6))
+        self.master_workspace = TableWorkspace(
+            self, folder=self._master_ws_folder,
+            formats=self._master_ws_formats, data=self.master_workspace_data,
+            load=self._master_load_workspace_data, label_var=self.master_workspace_var,
+            close_question=self._master_ws_close_question,
+        )
+        title_font = tkfont.nametofont("TkDefaultFont").copy()
+        title_font.configure(weight="bold")
+        self._master_title_font = title_font
+        self.ui_style.configure("MBS.Master.Title.TLabel", font=title_font)
+        ttk.Label(
+            toolbar,
+            text=("Duplo clique num valor para escrever, num nome para o editar. "
+                  "Clique direito: formato, copiar e base."),
+        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
+
+        self.master_canvas, self.master_grid, self._master_grid_item = \
+            self._table_build_scroll_grid(page, 2)
+        self.master_canvas.bind("<Configure>", self._master_schedule_reflow, add="+")
+        self.master_empty_label = ttk.Label(
+            self.master_grid,
+            text="Sem janelas. Usa \"Nova janela\" para começar a ler um Slave.",
+        )
+
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_class(self._master_wheel_tag, sequence, self._master_wheel)
+
+        self._master_build_row_menu()
+
+        # Reopen the workspace used last time; it is loaded once the window is
+        # complete so the COM port list is already known. Never connects.
+        last = saved.get("last_workspace", "")
+        if last and last in self.master_workspace.names():
+            self.after(10, lambda: self._master_restore_workspace(last))
+        else:
+            self.master_add_window()
+
+    def _master_build_connection(self, page, saved):
+        """Connection bar of the serial Master (COM port and serial format)."""
         connection = ttk.LabelFrame(page, text="Ligação — o Master transmite no barramento")
         connection.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
         self._master_connection_frame = connection
@@ -280,62 +361,9 @@ class MasterMixin(TableUiMixin):
         self.master_status_var = tk.StringVar(value=self.tr("Desligado"))
         ttk.Label(controls, textvariable=self.master_status_var).grid(row=0, column=3)
 
-        toolbar = ttk.Frame(page)
-        toolbar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
-        toolbar.columnconfigure(3, weight=1)
-        ttk.Button(toolbar, text="Nova janela", command=self.master_add_window).grid(
-            row=0, column=0, padx=(0, 6))
-        # Workspace menu: the saved workspaces are listed directly in it.
-        self.master_workspace_btn = ttk.Menubutton(toolbar, text="Workspace")
-        self.master_workspace_btn.grid(row=0, column=1, padx=(0, 6))
-        self.master_workspace_menu = tk.Menu(
-            self.master_workspace_btn, tearoff=False,
-            postcommand=self._master_build_workspace_menu,
-        )
-        self.master_workspace_btn.configure(menu=self.master_workspace_menu)
-        self.master_workspace_var = tk.StringVar(value="")
-        ttk.Label(toolbar, textvariable=self.master_workspace_var).grid(
-            row=0, column=2, padx=(0, 6))
-        self.master_workspace = TableWorkspace(
-            self, folder=get_master_workspaces_folder,
-            formats=MASTER_WORKSPACE_FORMATS, data=self.master_workspace_data,
-            load=self._master_load_workspace_data, label_var=self.master_workspace_var,
-            close_question="Guardar alterações ao workspace \"{name}\"?",
-        )
-        title_font = tkfont.nametofont("TkDefaultFont").copy()
-        title_font.configure(weight="bold")
-        self._master_title_font = title_font
-        self.ui_style.configure("MBS.Master.Title.TLabel", font=title_font)
-        ttk.Label(
-            toolbar,
-            text=("Duplo clique num valor para escrever, num nome para o editar. "
-                  "Clique direito: formato, copiar e base."),
-        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
-
-        self.master_canvas, self.master_grid, self._master_grid_item = \
-            self._table_build_scroll_grid(page, 2)
-        self.master_canvas.bind("<Configure>", self._master_schedule_reflow, add="+")
-        self.master_empty_label = ttk.Label(
-            self.master_grid,
-            text="Sem janelas. Usa \"Nova janela\" para começar a ler um Slave.",
-        )
-
-        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.bind_class(MASTER_WHEEL_TAG, sequence, self._master_wheel)
-
         for variable in (self.master_baud_var, self.master_parity_var, self.master_stop_var,
                          self.master_timeout_var, self.master_delay_var):
             variable.trace_add("write", lambda *_a: self._schedule_ui_settings_save())
-
-        self._master_build_row_menu()
-
-        # Reopen the workspace used last time; it is loaded once the window is
-        # complete so the COM port list is already known. Never connects.
-        last = saved.get("last_workspace", "")
-        if last and last in list_workspaces():
-            self.after(10, lambda: self._master_restore_workspace(last))
-        else:
-            self.master_add_window()
 
     def _master_restore_workspace(self, name):
         if not self.master_open_workspace(name, quiet=True):
@@ -343,7 +371,7 @@ class MasterMixin(TableUiMixin):
 
     # -- helpers ---------------------------------------------------------------
     def _master_install_wheel_tags(self, root_widget):
-        self._table_install_wheel_tags(root_widget, MASTER_WHEEL_TAG)
+        self._table_install_wheel_tags(root_widget, self._master_wheel_tag)
 
     def _master_wheel(self, event):
         return self._table_wheel(getattr(self, "master_canvas", None), event)
@@ -352,7 +380,8 @@ class MasterMixin(TableUiMixin):
         return window.title or self.trf("Janela {number}", number=window.number)
 
     def _master_window_summary(self, window):
-        return (f"Slave {window.slave} · FC{window.fc:02d} {FUNCTION_NAMES[window.fc]} · "
+        return (f"{self._master_id_label} {window.slave} · "
+                f"FC{window.fc:02d} {FUNCTION_NAMES[window.fc]} · "
                 f"{window.address + window.base} · {window.qty}")
 
     def _master_window_title(self, window):
@@ -396,7 +425,6 @@ class MasterMixin(TableUiMixin):
     def _master_build_pane(self, window, parent):
         frame = ttk.LabelFrame(parent, text="")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(5, weight=1)
         pane = {"frame": frame}
         window_id = window.window_id
 
@@ -407,8 +435,13 @@ class MasterMixin(TableUiMixin):
             close=lambda: self.master_close_window(window_id),
         )
 
+        # Row 1 holds the device of a TCP Client window; the serial Master has none.
+        target = self._master_build_target(frame, pane, window)
+        row = 2 if target is not None else 1
+        frame.rowconfigure(row + 4, weight=1)
+
         definition = ttk.Frame(frame)
-        definition.grid(row=1, column=0, sticky="w", padx=6, pady=(2, 2))
+        definition.grid(row=row, column=0, sticky="w", padx=6, pady=(2, 2))
         pane["slave_var"] = tk.StringVar(value=str(window.slave))
         pane["fc_var"] = tk.StringVar(value=fc_choice_label(window.fc))
         pane["address_var"] = tk.StringVar(value=str(window.address + window.base))
@@ -417,8 +450,9 @@ class MasterMixin(TableUiMixin):
         pane["format_var"] = tk.StringVar(value=FORMAT_LABELS[window.fmt])
 
         layout = (
-            ("Slave", ttk.Spinbox(definition, from_=1, to=247, width=4,
-                                  textvariable=pane["slave_var"])),
+            (self._master_id_label, ttk.Spinbox(
+                definition, from_=self._master_id_range[0], to=self._master_id_range[1],
+                width=4, textvariable=pane["slave_var"])),
             ("FC", ttk.Combobox(definition, values=FC_CHOICES, width=24, state="readonly",
                                 textvariable=pane["fc_var"])),
             ("Endereço", ttk.Entry(definition, width=6, textvariable=pane["address_var"])),
@@ -429,7 +463,7 @@ class MasterMixin(TableUiMixin):
             widget.grid(row=0, column=index * 2 + 1, padx=(0, 10))
 
         definition2 = ttk.Frame(frame)
-        definition2.grid(row=2, column=0, sticky="w", padx=6, pady=2)
+        definition2.grid(row=row + 1, column=0, sticky="w", padx=6, pady=2)
         format_combo = ttk.Combobox(
             definition2, values=[FORMAT_LABELS[k] for k in FORMAT_LABELS], width=20,
             state="readonly", textvariable=pane["format_var"],
@@ -444,7 +478,7 @@ class MasterMixin(TableUiMixin):
         pane["format_combo"] = format_combo
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=0, sticky="w", padx=6, pady=(2, 2))
+        buttons.grid(row=row + 2, column=0, sticky="w", padx=6, pady=(2, 2))
         actions = (
             ("Aplicar", lambda: self.master_apply_window(window_id)),
             ("Pausar", lambda: self.master_toggle_pause(window_id)),
@@ -460,7 +494,7 @@ class MasterMixin(TableUiMixin):
                 pane["apply_btn"] = button
 
         status = ttk.Frame(frame)
-        status.grid(row=4, column=0, sticky="ew", padx=6, pady=(2, 2))
+        status.grid(row=row + 3, column=0, sticky="ew", padx=6, pady=(2, 2))
         status.columnconfigure(1, weight=1)
         pane["counters_var"] = tk.StringVar()
         pane["message_var"] = tk.StringVar()
@@ -469,21 +503,23 @@ class MasterMixin(TableUiMixin):
         pane["message_label"].grid(row=0, column=1, sticky="w", padx=(14, 0))
 
         self._table_build_tree(
-            frame, pane, 5,
+            frame, pane, row + 4,
             on_double=lambda e: self._master_on_double_click(window_id, e),
             on_return=lambda: self._master_edit_value(window_id),
             on_menu=lambda e: self._master_show_row_menu(window_id, e),
         )
 
-        for widget in (definition, definition2):
+        rows = (definition, definition2) + ((target,) if target is not None else ())
+        for widget in rows:
             for child in widget.winfo_children():
                 if isinstance(child, (ttk.Entry, ttk.Spinbox)):
                     child.bind("<Return>", lambda _e: self.master_apply_window(window_id))
 
-        self._table_translate_captions(definition, definition2, buttons, header_buttons)
+        self._table_translate_captions(*rows, buttons, header_buttons)
 
         self._master_panes[window_id] = pane
-        for name in ("slave_var", "fc_var", "address_var", "qty_var", "scan_var", "format_var"):
+        for name in ("slave_var", "fc_var", "address_var", "qty_var", "scan_var", "format_var",
+                     *pane.get("target_vars", ())):
             pane[name].trace_add("write",
                                  lambda *_a: self._master_update_apply_state(window_id))
         self._master_fill_rows(window)
@@ -492,6 +528,17 @@ class MasterMixin(TableUiMixin):
         self._master_update_apply_state(window_id)
         self._master_install_wheel_tags(frame)
         return frame
+
+    def _master_build_target(self, frame, pane, window):
+        """Row with the device of the window (TCP Client only); None here."""
+        return None
+
+    def _master_parse_target(self, pane):
+        """Device fields of a window as a dict (TCP Client only; ValueError if invalid)."""
+        return {}
+
+    def _master_validate_definition(self, slave, fc, address, qty):
+        validate_read_definition(slave, fc, address, qty)
 
     def _master_update_format_state(self, window):
         pane = self._master_panes.get(window.window_id)
@@ -554,7 +601,7 @@ class MasterMixin(TableUiMixin):
     def master_add_window(self, kwargs=None):
         if len(self.master_windows) >= MASTER_MAX_WINDOWS:
             messagebox.showwarning(
-                self.tr("Master"),
+                self.tr(self._master_tab_name),
                 self.trf("Máximo de {count} janelas.", count=MASTER_MAX_WINDOWS),
             )
             return None
@@ -562,7 +609,7 @@ class MasterMixin(TableUiMixin):
         self._master_next_id += 1
         numbers = {w.number for w in self.master_windows.values()}
         number = next(n for n in range(1, MASTER_MAX_WINDOWS + 2) if n not in numbers)
-        window = MasterWindow(window_id, number, **(kwargs or {}))
+        window = self._master_window_class(window_id, number, **(kwargs or {}))
         self.master_windows[window_id] = window
         self._master_build_pane(window, self.master_grid)
         self._master_reflow()
@@ -574,7 +621,7 @@ class MasterMixin(TableUiMixin):
     def master_duplicate_window(self, window_id):
         window = self.master_windows.get(window_id)
         if window is not None:
-            data = MasterWindow.validated_kwargs(window.to_json())
+            data = self._master_window_class.validated_kwargs(window.to_json())
             self.master_add_window(data)
 
     def master_close_window(self, window_id):
@@ -604,8 +651,8 @@ class MasterMixin(TableUiMixin):
             return False
         try:
             base = window.base
-            slave = parse_int_field(pane["slave_var"].get(), 1, 247,
-                                    "O Slave ID de leitura tem de estar entre 1 e 247.")
+            slave = parse_int_field(pane["slave_var"].get(), *self._master_id_range,
+                                    self._master_id_message)
             fc = int(pane["fc_var"].get()[:2])
             address = parse_int_field(pane["address_var"].get(), base, 0xFFFF + base,
                                       "O endereço tem de estar entre 0 e 65535.") - base
@@ -613,15 +660,19 @@ class MasterMixin(TableUiMixin):
                                   "Quantidade fora do limite desta função.")
             scan_ms = parse_int_field(pane["scan_var"].get(), 0, MASTER_MAX_SCAN_MS,
                                       "Scan rate fora do intervalo.")
-            validate_read_definition(slave, fc, address, qty)
+            self._master_validate_definition(slave, fc, address, qty)
+            target = self._master_parse_target(pane)
         except ValueError as exc:
             messagebox.showerror(self.tr("Janela inválida"), self.tr(str(exc)))
             return False
 
         fmt = FORMAT_KEYS_BY_LABEL.get(pane["format_var"].get(), DEFAULT_FORMAT)
         changed_area = (slave, fc, address, qty) != (window.slave, window.fc,
-                                                     window.address, window.qty)
+                                                     window.address, window.qty) or any(
+            getattr(window, key) != value for key, value in target.items())
         changed = changed_area or (scan_ms, fmt) != (window.scan_ms, window.fmt)
+        for key, value in target.items():
+            setattr(window, key, value)
         window.slave, window.fc, window.address, window.qty = slave, fc, address, qty
         window.scan_ms, window.fmt = scan_ms, fmt
         if changed_area:
@@ -650,7 +701,7 @@ class MasterMixin(TableUiMixin):
 
     def master_read_once(self, window_id):
         if self.master_engine is None:
-            messagebox.showinfo(self.tr("Master"), self.tr("Liga primeiro o Master."))
+            messagebox.showinfo(self.tr(self._master_tab_name), self.tr(self._master_connect_first))
             return
         self.master_engine.read_once(window_id)
 
@@ -669,7 +720,7 @@ class MasterMixin(TableUiMixin):
 
         window.popped = not window.popped
         if window.popped:
-            top = tk.Toplevel(self)
+            top = tk.Toplevel(self._table_root())
             top.geometry("660x420")
             top.minsize(MASTER_PANE_MIN_WIDTH, 300)
             top.columnconfigure(0, weight=1)
@@ -773,7 +824,8 @@ class MasterMixin(TableUiMixin):
         fc_var = tk.IntVar(value=single_fc if size == 1 else multiple_fc)
 
         rows = (
-            ("Slave (0 = broadcast)", ttk.Spinbox(body, from_=0, to=247, width=6,
+            (self._master_write_id_label, ttk.Spinbox(body, from_=self._master_write_id_range[0],
+                                                      to=self._master_write_id_range[1], width=6,
                                                   textvariable=slave_var)),
             ("Endereço", ttk.Entry(body, width=8, textvariable=address_var)),
             ("Valor(es)", ttk.Entry(body, width=30, textvariable=value_var)),
@@ -817,7 +869,7 @@ class MasterMixin(TableUiMixin):
                 message_var.set(self.tr(str(exc)))
                 return
             if self.master_engine is None:
-                message_var.set(self.tr("Liga primeiro o Master."))
+                message_var.set(self.tr(self._master_connect_first))
                 return
             self.master_engine.queue_write(window.window_id, request, description)
             dialog.destroy()
@@ -885,13 +937,13 @@ class MasterMixin(TableUiMixin):
             return
         if self.busy:
             messagebox.showwarning(
-                self.tr("Master"),
+                self.tr(self._master_tab_name),
                 self.tr("Para a captura, a pesquisa ou o Slave em curso antes de ligar o Master."),
             )
             return
         if not self.master_safety_var.get():
             messagebox.showwarning(
-                self.tr("Master"),
+                self.tr(self._master_tab_name),
                 self.tr("Confirma primeiro que não existe outro master ativo no barramento."),
             )
             return
@@ -916,7 +968,7 @@ class MasterMixin(TableUiMixin):
             )
         except Exception as exc:
             messagebox.showerror(
-                self.tr("Master"),
+                self.tr(self._master_tab_name),
                 self.trf("Não foi possível abrir {port}: {error}",
                          port=settings["port"], error=f"{type(exc).__name__}: {exc}"),
             )
@@ -1006,7 +1058,7 @@ class MasterMixin(TableUiMixin):
                 )
             else:
                 text = self.trf("Erro na porta série: {error}", error=detail)
-            messagebox.showerror(self.tr("Master"), text)
+            messagebox.showerror(self.tr(self._master_tab_name), text)
 
     # -- worker events -------------------------------------------------------------
     def handle_master_event(self, event, payload):
@@ -1078,6 +1130,9 @@ class MasterMixin(TableUiMixin):
             name = MODBUS_EXCEPTION_CODES.get(code, ("Unknown/Reserved Exception", ""))[0]
             self._master_set_message(window, "Exception 0x{code:02X} — {name}", "error",
                                      code=code, name=name)
+        elif status == "no_connection":
+            self._master_set_message(window, "Sem ligação: {error}", "error",
+                                     error=result.get("error", "")[:60])
         else:
             self._master_set_message(window, "Resposta inválida (CRC ou formato): {rx}",
                                      "error", rx=result.get("rx", "")[:47])
@@ -1085,19 +1140,37 @@ class MasterMixin(TableUiMixin):
     # -- workspace -------------------------------------------------------------------
     def master_workspace_data(self):
         return {
-            "format": MASTER_WORKSPACE_FORMAT,
+            "format": self._master_ws_formats[0],
             "version": MASTER_WORKSPACE_VERSION,
-            "connection": {
-                "port": self.master_port_var.get(),
-                "baud": self.master_baud_var.get(),
-                "parity": self.master_parity_var.get(),
-                "stop_bits": self.master_stop_var.get(),
-                "response_timeout_ms": self.master_timeout_var.get(),
-                "delay_ms": self.master_delay_var.get(),
-            },
+            "connection": self._master_connection_json(),
             "windows": [w.to_json() for w in sorted(self.master_windows.values(),
                                                      key=lambda w: w.number)],
         }
+
+    def _master_connection_json(self):
+        return {
+            "port": self.master_port_var.get(),
+            "baud": self.master_baud_var.get(),
+            "parity": self.master_parity_var.get(),
+            "stop_bits": self.master_stop_var.get(),
+            "response_timeout_ms": self.master_timeout_var.get(),
+            "delay_ms": self.master_delay_var.get(),
+        }
+
+    def _master_apply_connection(self, connection):
+        """Connection settings of an opened workspace (only while disconnected)."""
+        if str(connection.get("baud")) in [str(b) for b in DISCOVERY_BAUD_RATES]:
+            self.master_baud_var.set(str(connection["baud"]))
+        if connection.get("parity") in MASTER_PARITIES:
+            self.master_parity_var.set(connection["parity"])
+        if str(connection.get("stop_bits")) in MASTER_STOP_BITS:
+            self.master_stop_var.set(str(connection["stop_bits"]))
+        for key, var in (("response_timeout_ms", self.master_timeout_var),
+                         ("delay_ms", self.master_delay_var)):
+            if str(connection.get(key, "")).isdigit():
+                var.set(str(connection[key]))
+        if connection.get("port") in tuple(self.master_port_combo["values"]):
+            self.master_port_var.set(connection["port"])
 
     def _master_mark_changed(self):
         self.master_workspace.mark_changed()
@@ -1121,7 +1194,7 @@ class MasterMixin(TableUiMixin):
         entries, skipped = [], 0
         for item in data.get("windows", [])[:MASTER_MAX_WINDOWS]:
             try:
-                entries.append(MasterWindow.validated_kwargs(item))
+                entries.append(self._master_window_class.validated_kwargs(item))
             except (ValueError, TypeError):
                 skipped += 1
 
@@ -1129,18 +1202,7 @@ class MasterMixin(TableUiMixin):
             self.master_close_window(window_id)
         connection = data.get("connection", {})
         if isinstance(connection, dict) and not self.master_active:
-            if str(connection.get("baud")) in [str(b) for b in DISCOVERY_BAUD_RATES]:
-                self.master_baud_var.set(str(connection["baud"]))
-            if connection.get("parity") in MASTER_PARITIES:
-                self.master_parity_var.set(connection["parity"])
-            if str(connection.get("stop_bits")) in MASTER_STOP_BITS:
-                self.master_stop_var.set(str(connection["stop_bits"]))
-            for key, var in (("response_timeout_ms", self.master_timeout_var),
-                             ("delay_ms", self.master_delay_var)):
-                if str(connection.get(key, "")).isdigit():
-                    var.set(str(connection[key]))
-            if connection.get("port") in tuple(self.master_port_combo["values"]):
-                self.master_port_var.set(connection["port"])
+            self._master_apply_connection(connection)
         for kwargs in entries:
             self.master_add_window(kwargs)
         return skipped
@@ -1192,13 +1254,9 @@ class MasterMixin(TableUiMixin):
         except tk.TclError:
             pass
 
-    def _master_row_tags(index):
-        """Alternate rows get a slightly darker background (zebra striping)."""
-        return ("odd",) if index % 2 else ()
-
     # -- right-click menu: per-address format, copy, base ---------------------------
     def _master_build_row_menu(self):
-        self._master_row_menu = tk.Menu(self, tearoff=False)
+        self._master_row_menu = tk.Menu(self._table_root(), tearoff=False)
 
     def _master_selected_rows(self, window_id):
         return self._table_selected_rows(self._master_panes.get(window_id))
@@ -1219,12 +1277,16 @@ class MasterMixin(TableUiMixin):
             remove_scale=lambda: self.master_remove_scale(window_id),
             copy=lambda: self.master_copy_rows(window_id),
             set_base=lambda base: self.master_set_base(window_id, base),
-            extra=(("Abrir no Slave", lambda: self.slave_open_from_master(window)),)
-            if hasattr(self, "slave_open_from_master") else (),
+            extra=self._master_row_menu_extra(window),
         )
         self._master_apply_menu_palette()
         self._table_popup(self._master_row_menu, event)
         return "break"
+
+    def _master_row_menu_extra(self, window):
+        label, method = self._master_open_in_slave
+        opener = getattr(self, method, None)
+        return ((label, lambda: opener(window)),) if callable(opener) else ()
 
     def master_set_row_format(self, window_id, fmt):
         """Apply *fmt* (None = window format) to the selected rows."""
@@ -1301,7 +1363,7 @@ class MasterMixin(TableUiMixin):
                 self.master_port_var.set(port)
         window = self.master_add_window(definition)
         try:
-            self.main_notebook.select(self.master_page)
+            self.main_notebook.select(getattr(self, self._master_page_attr))
         except tk.TclError:
             pass
         return window

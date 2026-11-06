@@ -294,14 +294,38 @@ class TableWorkspace:
         return self.save(self.current) if answer else True
 
 
+class TabInstance:
+    """Second copy of a tab mixin with its own state, sharing the application.
+
+    The Modbus TCP Client and Server tabs are the Master and Slave mixins run
+    on a ``TabInstance``: attributes set by the tab (its windows, engine,
+    widgets, ``busy`` flag...) live on the instance, while everything else
+    (``tr``, ``after``, ``event_queue``, ``ui_settings``, the theme...) is
+    looked up on the application. Tk widgets are created with
+    ``_table_root()`` as parent, never with the instance itself.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    def __getattr__(self, name):
+        if name == "app":
+            raise AttributeError(name)
+        return getattr(self.app, name)
+
+
 class TableUiMixin:
     """Widget code shared by the Master and Slave window grids."""
 
+    def _table_root(self):
+        """Tk parent for new top-level windows and menus of this tab."""
+        return getattr(self, "app", self)
+
     # -- dialogs -----------------------------------------------------------------
     def _table_dialog(self, title):
-        dialog = tk.Toplevel(self)
+        dialog = tk.Toplevel(self._table_root())
         dialog.title(title)
-        dialog.transient(self)
+        dialog.transient(self._table_root())
         dialog.resizable(False, False)
         self._table_apply_toplevel_palette(dialog)
         body = ttk.Frame(dialog, padding=12)

@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title Build MBToolkit 3.4
+title Build MBToolkit 3.5
 
 rem Normalizar caminhos sem barra final. Isto evita problemas de parsing
 rem do Windows/Python quando um argumento quoted termina em "\".

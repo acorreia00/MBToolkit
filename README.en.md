@@ -4,7 +4,7 @@
 
 [Português](README.md) | [English](README.en.md)
 
-**MBToolkit** is a Windows application for diagnosing **Modbus RTU** communications over **RS485** and **RS232**. It can passively observe and analyse bus traffic, locate Modbus devices on the bus and read/write values as a Modbus RTU master.
+**MBToolkit** is a Windows application for diagnosing **Modbus RTU** communications over **RS485** and **RS232** and **Modbus TCP**. It can passively observe and analyse bus traffic, locate Modbus devices on the bus and read/write values as a Modbus RTU master.
 
 ## Features
 
@@ -19,6 +19,7 @@
 - **Bus Slave Finder** for active Slave ID discovery, with configurable retries, optional Device Identification (FC43/14), a safety warning and an automatic idle-bus check;
 - **Master** with several windows (one per Slave or data area): cyclic FC01–FC04 reads, FC05/06/15/16 writes, 16, 32 and 64-bit formats (including float and double, in the 4 byte orders), also per address, scaling to engineering units, per-window counters and errors, named pop-out windows workspaces saved in a menu, "Open in Master" from the Sniffer and the Finder and automatic port reconnection;
 - **Slave** (simulator) with several Slave IDs and tables (Coils, Discrete Inputs, Holding and Input Registers) answering a real master on FC01–FC06/15/16, with exceptions like a real device, value editing, highlighted master writes, automatic values (counter, ramp, sine, random, toggle), "Open in Slave" from the Sniffer and the Master and fault simulation per Slave ID (delay, no response, Exception, wrong CRC, probability);
+- **Modbus TCP Client** and **Server**: the Master and Slave windows over the network (IP, port and Unit ID per Client window; Server listening on this PC only, one network interface or all, with several clients), running alongside the RTU tabs;
 - Runtime **Português / English** interface selection;
 - Light and Dark modes with persistent preferences.
 
@@ -34,6 +35,6 @@ MBToolkit.bat
 
 The package also contains the git history (`.git`), the documentation tools (`tools/`) and the technical PDF.
 
-The launcher checks Python and installs `pyserial` when required. To build the standalone executable, use `MBToolkit v3.4\build_exe.bat`.
+The launcher checks Python and installs `pyserial` when required. To build the standalone executable, use `MBToolkit v3.5\build_exe.bat`.
 
 Language, Light/Dark mode and other application preferences are stored in `%APPDATA%\MBToolkit\settings.json`. The selected COM port is not saved, so you must choose the port again each time you start the program.

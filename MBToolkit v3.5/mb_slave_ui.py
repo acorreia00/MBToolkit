@@ -67,7 +67,6 @@ from mb_table_ui import (
     TableUiMixin,
     TableWorkspace,
     apply_format_to_rows,
-    list_workspaces,
     parse_int_field,
     validated_formats,
     validated_names,
@@ -84,15 +83,19 @@ TABLE_CHOICES = tuple(table_choice_label(t) for t in TABLES)
 TABLE_KEYS_BY_LABEL = {table_choice_label(t): t for t in TABLES}
 
 
-def fault_parts(fault):
-    """(PT template, values) pieces describing an active fault."""
+def fault_parts(fault, bad_reply="CRC errado"):
+    """(PT template, values) pieces describing an active fault.
+
+    *bad_reply* names the corrupted-response fault (wrong CRC on RTU, invalid
+    MBAP header on TCP).
+    """
     parts = []
     if fault.get("no_response"):
         parts.append(("sem resposta", {}))
     if fault.get("exception"):
         parts.append(("Exception {code:02X}", {"code": fault["exception"]}))
     if fault.get("bad_crc"):
-        parts.append(("CRC errado", {}))
+        parts.append((bad_reply, {}))
     if fault.get("delay_ms"):
         parts.append(("atraso {ms} ms", {"ms": fault["delay_ms"]}))
     return parts
@@ -252,11 +255,32 @@ def validate_area(slave, table, address, qty):
 
 
 class SlaveMixin(TableUiMixin):
-    """Slave (simulator) tab GUI."""
+    """Slave (simulator) tab GUI.
+
+    The class attributes below describe this tab. The Modbus TCP Server tab
+    (``mb_tcp_ui.ServerTab``) is a second instance of this mixin with its own
+    state and store; it overrides them and the connection-specific methods
+    (``_slave_build_connection``, ``slave_connect``, ...).
+    """
+
+    _slave_tab_name = "Slave"
+    _slave_settings_key = "slave"
+    _slave_page_attr = "slave_page"
+    _slave_wheel_tag = SLAVE_WHEEL_TAG
+    _slave_ws_folder = staticmethod(get_slave_workspaces_folder)
+    _slave_ws_format = SLAVE_WORKSPACE_FORMAT
+    _slave_ws_close_question = "Guardar alterações ao workspace do Slave \"{name}\"?"
+    _slave_id_label = "Slave"
+    _slave_fault_title = "Falhas do Slave {slave}"
+    _slave_fault_intro = ("Simulação de falhas do Slave {slave} (aplica-se a todas as janelas "
+                          "deste ID).")
+    # Corrupted-response fault: header text and dialog option.
+    _slave_bad_reply = "CRC errado"
+    _slave_bad_reply_option = "CRC errado nas respostas"
 
     # -- construction ----------------------------------------------------------
     def build_slave_tab(self, page):
-        saved = getattr(self, "ui_settings", {}).get("slave", {})
+        saved = getattr(self, "ui_settings", {}).get(self._slave_settings_key, {})
         if not isinstance(saved, dict):
             saved = {}
 
@@ -280,6 +304,58 @@ class SlaveMixin(TableUiMixin):
         page.columnconfigure(0, weight=1)
         page.rowconfigure(2, weight=1)
 
+        self._slave_build_connection(page, saved)
+        self._slave_render_stats()
+
+        toolbar = ttk.Frame(page)
+        toolbar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+        toolbar.columnconfigure(3, weight=1)
+        ttk.Button(toolbar, text="Nova janela", command=self.slave_add_window).grid(
+            row=0, column=0, padx=(0, 6))
+        self.slave_workspace_btn = ttk.Menubutton(toolbar, text="Workspace")
+        self.slave_workspace_btn.grid(row=0, column=1, padx=(0, 6))
+        self.slave_workspace_menu = tk.Menu(
+            self.slave_workspace_btn, tearoff=False,
+            postcommand=self._slave_build_workspace_menu,
+        )
+        self.slave_workspace_btn.configure(menu=self.slave_workspace_menu)
+        self.slave_workspace_var = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self.slave_workspace_var).grid(
+            row=0, column=2, padx=(0, 6))
+        self.slave_workspace = TableWorkspace(
+            self, folder=self._slave_ws_folder, formats=(self._slave_ws_format,),
+            data=self.slave_workspace_data, load=self._slave_load_workspace_data,
+            label_var=self.slave_workspace_var,
+            close_question=self._slave_ws_close_question,
+        )
+        ttk.Label(
+            toolbar,
+            text=("Duplo clique num valor para o alterar, num nome para o editar. "
+                  "Clique direito: formato, escala, copiar e base."),
+        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
+
+        self.slave_canvas, self.slave_grid, self._slave_grid_item = \
+            self._table_build_scroll_grid(page, 2)
+        self.slave_canvas.bind("<Configure>", self._slave_schedule_reflow, add="+")
+        self.slave_empty_label = ttk.Label(
+            self.slave_grid,
+            text="Sem janelas. Usa \"Nova janela\" para simular um Slave.",
+        )
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_class(self._slave_wheel_tag, sequence,
+                            lambda e: self._table_wheel(self.slave_canvas, e))
+
+        self._slave_row_menu = tk.Menu(self._table_root(), tearoff=False)
+
+        # Reopen the workspace used last time (never starts listening).
+        last = saved.get("last_workspace", "")
+        if last and last in self.slave_workspace.names():
+            self.after(10, lambda: self._slave_restore_workspace(last))
+        else:
+            self.slave_add_window()
+
+    def _slave_build_connection(self, page, saved):
+        """Connection bar of the serial Slave (COM port, serial format, counters)."""
         connection = ttk.LabelFrame(
             page, text="Ligação — o Slave responde aos pedidos de um master real")
         connection.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
@@ -344,57 +420,9 @@ class SlaveMixin(TableUiMixin):
         self.slave_stats_var = tk.StringVar()
         ttk.Label(connection, textvariable=self.slave_stats_var).grid(
             row=2, column=0, sticky="w", padx=8, pady=(0, 8))
-        self._slave_render_stats()
-
-        toolbar = ttk.Frame(page)
-        toolbar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
-        toolbar.columnconfigure(3, weight=1)
-        ttk.Button(toolbar, text="Nova janela", command=self.slave_add_window).grid(
-            row=0, column=0, padx=(0, 6))
-        self.slave_workspace_btn = ttk.Menubutton(toolbar, text="Workspace")
-        self.slave_workspace_btn.grid(row=0, column=1, padx=(0, 6))
-        self.slave_workspace_menu = tk.Menu(
-            self.slave_workspace_btn, tearoff=False,
-            postcommand=self._slave_build_workspace_menu,
-        )
-        self.slave_workspace_btn.configure(menu=self.slave_workspace_menu)
-        self.slave_workspace_var = tk.StringVar(value="")
-        ttk.Label(toolbar, textvariable=self.slave_workspace_var).grid(
-            row=0, column=2, padx=(0, 6))
-        self.slave_workspace = TableWorkspace(
-            self, folder=get_slave_workspaces_folder, formats=(SLAVE_WORKSPACE_FORMAT,),
-            data=self.slave_workspace_data, load=self._slave_load_workspace_data,
-            label_var=self.slave_workspace_var,
-            close_question="Guardar alterações ao workspace do Slave \"{name}\"?",
-        )
-        ttk.Label(
-            toolbar,
-            text=("Duplo clique num valor para o alterar, num nome para o editar. "
-                  "Clique direito: formato, escala, copiar e base."),
-        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
-
-        self.slave_canvas, self.slave_grid, self._slave_grid_item = \
-            self._table_build_scroll_grid(page, 2)
-        self.slave_canvas.bind("<Configure>", self._slave_schedule_reflow, add="+")
-        self.slave_empty_label = ttk.Label(
-            self.slave_grid,
-            text="Sem janelas. Usa \"Nova janela\" para simular um Slave.",
-        )
-        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.bind_class(SLAVE_WHEEL_TAG, sequence,
-                            lambda e: self._table_wheel(self.slave_canvas, e))
 
         for variable in (self.slave_baud_var, self.slave_parity_var, self.slave_stop_var):
             variable.trace_add("write", lambda *_a: self._schedule_ui_settings_save())
-
-        self._slave_row_menu = tk.Menu(self, tearoff=False)
-
-        # Reopen the workspace used last time (never starts listening).
-        last = saved.get("last_workspace", "")
-        if last and last in list_workspaces(get_slave_workspaces_folder()):
-            self.after(10, lambda: self._slave_restore_workspace(last))
-        else:
-            self.slave_add_window()
 
     def _slave_restore_workspace(self, name):
         if not self.slave_open_workspace(name, quiet=True):
@@ -415,7 +443,7 @@ class SlaveMixin(TableUiMixin):
         return window.title or self.trf("Janela {number}", number=window.number)
 
     def _slave_window_summary(self, window):
-        return (f"Slave {window.slave} · FC{TABLE_READ_FC[window.table]:02d} "
+        return (f"{self._slave_id_label} {window.slave} · FC{TABLE_READ_FC[window.table]:02d} "
                 f"{table_label(window.table)} · "
                 f"{window.address + window.base} · {window.qty}")
 
@@ -423,7 +451,8 @@ class SlaveMixin(TableUiMixin):
         fault = self.slave_faults.get(slave)
         if not fault_active(fault):
             return ""
-        text = ", ".join(self.trf(template, **values) for template, values in fault_parts(fault))
+        text = ", ".join(self.trf(template, **values)
+                         for template, values in fault_parts(fault, self._slave_bad_reply))
         if fault["probability"] < 100:
             text += f" · {fault['probability']}%"
         return self.trf("⚠ Falha simulada: {fault}", fault=text)
@@ -482,7 +511,7 @@ class SlaveMixin(TableUiMixin):
         pane["qty_var"] = tk.StringVar(value=str(window.qty))
         pane["format_var"] = tk.StringVar(value=FORMAT_LABELS[window.fmt])
         layout = (
-            ("Slave", ttk.Spinbox(definition, from_=1, to=247, width=4,
+            (self._slave_id_label, ttk.Spinbox(definition, from_=1, to=247, width=4,
                                   textvariable=pane["slave_var"])),
             ("Tabela", ttk.Combobox(definition, values=TABLE_CHOICES, width=22,
                                     state="readonly", textvariable=pane["table_var"])),
@@ -543,7 +572,7 @@ class SlaveMixin(TableUiMixin):
         self._slave_update_format_state(window)
         self._slave_render_status(window)
         self._slave_update_apply_state(window_id)
-        self._table_install_wheel_tags(frame, SLAVE_WHEEL_TAG)
+        self._table_install_wheel_tags(frame, self._slave_wheel_tag)
         return frame
 
     def _slave_update_format_state(self, window):
@@ -622,7 +651,7 @@ class SlaveMixin(TableUiMixin):
     def slave_add_window(self, kwargs=None):
         if len(self.slave_windows) >= SLAVE_MAX_WINDOWS:
             messagebox.showwarning(
-                self.tr("Slave"),
+                self.tr(self._slave_tab_name),
                 self.trf("Máximo de {count} janelas.", count=SLAVE_MAX_WINDOWS),
             )
             return None
@@ -738,7 +767,7 @@ class SlaveMixin(TableUiMixin):
             pass
         window.popped = not window.popped
         if window.popped:
-            top = tk.Toplevel(self)
+            top = tk.Toplevel(self._table_root())
             top.geometry("660x420")
             top.minsize(TABLE_PANE_MIN_WIDTH, 300)
             top.columnconfigure(0, weight=1)
@@ -1160,17 +1189,11 @@ class SlaveMixin(TableUiMixin):
         when it is not listening and they are valid.
         """
         if not self.slave_active:
-            if str(baud) in [str(b) for b in DISCOVERY_BAUD_RATES]:
-                self.slave_baud_var.set(str(baud))
-            if parity in SERIAL_PARITIES:
-                self.slave_parity_var.set(parity)
-            if str(stopbits) in SERIAL_STOP_BITS:
-                self.slave_stop_var.set(str(stopbits))
-            if port and port in tuple(self.slave_port_combo["values"]):
-                self.slave_port_var.set(port)
+            self._slave_apply_connection({"port": port, "baud": baud, "parity": parity,
+                                          "stop_bits": stopbits})
         window = self.slave_add_window(definition)
         try:
-            self.main_notebook.select(self.slave_page)
+            self.main_notebook.select(getattr(self, self._slave_page_attr))
         except tk.TclError:
             pass
         return window
@@ -1193,16 +1216,20 @@ class SlaveMixin(TableUiMixin):
     def slave_open_from_master(self, master_window):
         """Simulate the data area of a Master window (same names, formats and scales)."""
         definition = {
-            "slave": master_window.slave, "table": FC_TABLES[master_window.fc],
+            # A TCP Client may use Unit IDs 0 and 248–255; simulate them as 1.
+            "slave": master_window.slave if 1 <= master_window.slave <= 247 else 1,
+            "table": FC_TABLES[master_window.fc],
             "address": master_window.address, "qty": master_window.qty,
             "base": master_window.base, "fmt": master_window.fmt,
             "title": master_window.title, "names": dict(master_window.names),
             "formats": dict(master_window.formats),
             "scales": {a: dict(s) for a, s in master_window.scales.items()},
         }
+        serial = getattr(self, "master_baud_var", None) is not None
         return self.slave_open_definition(
-            definition, baud=self.master_baud_var.get(),
-            parity=self.master_parity_var.get(), stopbits=self.master_stop_var.get(),
+            definition, baud=self.master_baud_var.get() if serial else "",
+            parity=self.master_parity_var.get() if serial else "",
+            stopbits=self.master_stop_var.get() if serial else "",
         )
 
     # -- fault simulation -----------------------------------------------------------------
@@ -1223,9 +1250,9 @@ class SlaveMixin(TableUiMixin):
             return
         slave = window.slave
         current = self.slave_faults.get(slave) or default_fault()
-        dialog, body = self._table_dialog(self.trf("Falhas do Slave {slave}", slave=slave))
+        dialog, body = self._table_dialog(self.trf(self._slave_fault_title, slave=slave))
         ttk.Label(body, text=self.trf(
-            "Simulação de falhas do Slave {slave} (aplica-se a todas as janelas deste ID).",
+            self._slave_fault_intro,
             slave=slave)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         delay_var = tk.StringVar(value=str(current["delay_ms"]))
@@ -1249,7 +1276,7 @@ class SlaveMixin(TableUiMixin):
             row=3, column=0, sticky="w", padx=(0, 8), pady=2)
         ttk.Combobox(body, values=exception_labels, textvariable=exception_var, width=28,
                      state="readonly").grid(row=3, column=1, sticky="w", pady=2)
-        ttk.Checkbutton(body, text=self.tr("CRC errado nas respostas"), variable=crc_var).grid(
+        ttk.Checkbutton(body, text=self.tr(self._slave_bad_reply_option), variable=crc_var).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(body, text=self.tr("Probabilidade (%)")).grid(
             row=5, column=0, sticky="w", padx=(0, 8), pady=2)
@@ -1300,13 +1327,13 @@ class SlaveMixin(TableUiMixin):
             return
         if self.busy:
             messagebox.showwarning(
-                self.tr("Slave"),
+                self.tr(self._slave_tab_name),
                 self.tr("Para a captura, a pesquisa ou o Master em curso antes de ligar o Slave."),
             )
             return
         if not self.slave_safety_var.get():
             messagebox.showwarning(
-                self.tr("Slave"),
+                self.tr(self._slave_tab_name),
                 self.tr("Confirma primeiro que nenhum equipamento no barramento usa os "
                         "Slave IDs simulados."),
             )
@@ -1324,7 +1351,7 @@ class SlaveMixin(TableUiMixin):
             if not self.slave_apply_window(window_id):
                 return
         if not self.slave_windows:
-            messagebox.showwarning(self.tr("Slave"),
+            messagebox.showwarning(self.tr(self._slave_tab_name),
                                    self.tr("Cria primeiro uma janela com o Slave a simular."))
             return
         baud, parity, stopbits = (int(self.slave_baud_var.get()), self.slave_parity_var.get(),
@@ -1333,7 +1360,7 @@ class SlaveMixin(TableUiMixin):
             ser = self.open_discovery_serial_port(serial, port, baud, parity, stopbits)
         except Exception as exc:
             messagebox.showerror(
-                self.tr("Slave"),
+                self.tr(self._slave_tab_name),
                 self.trf("Não foi possível abrir {port}: {error}",
                          port=port, error=f"{type(exc).__name__}: {exc}"),
             )
@@ -1402,7 +1429,7 @@ class SlaveMixin(TableUiMixin):
         self.slave_status_var.set(self.tr("Desligado"))
         error = (payload or {}).get("error")
         if error:
-            messagebox.showerror(self.tr("Slave"),
+            messagebox.showerror(self.tr(self._slave_tab_name),
                                  self.trf("Erro na porta série: {error}", error=error))
 
     # -- worker events ---------------------------------------------------------------
@@ -1515,19 +1542,33 @@ class SlaveMixin(TableUiMixin):
         """Configuration only: the register values are not saved."""
         used = {w.slave for w in self.slave_windows.values()}
         return {
-            "format": SLAVE_WORKSPACE_FORMAT,
+            "format": self._slave_ws_format,
             "version": SLAVE_WORKSPACE_VERSION,
-            "connection": {
-                "port": self.slave_port_var.get(),
-                "baud": self.slave_baud_var.get(),
-                "parity": self.slave_parity_var.get(),
-                "stop_bits": self.slave_stop_var.get(),
-            },
+            "connection": self._slave_connection_json(),
             "windows": [w.to_json() for w in sorted(self.slave_windows.values(),
                                                      key=lambda w: w.number)],
             "faults": {str(slave): fault for slave, fault in sorted(self.slave_faults.items())
                        if slave in used},
         }
+
+    def _slave_connection_json(self):
+        return {
+            "port": self.slave_port_var.get(),
+            "baud": self.slave_baud_var.get(),
+            "parity": self.slave_parity_var.get(),
+            "stop_bits": self.slave_stop_var.get(),
+        }
+
+    def _slave_apply_connection(self, connection):
+        """Serial settings from a workspace or another tab (valid ones only)."""
+        if str(connection.get("baud")) in [str(b) for b in DISCOVERY_BAUD_RATES]:
+            self.slave_baud_var.set(str(connection["baud"]))
+        if connection.get("parity") in SERIAL_PARITIES:
+            self.slave_parity_var.set(connection["parity"])
+        if str(connection.get("stop_bits")) in SERIAL_STOP_BITS:
+            self.slave_stop_var.set(str(connection["stop_bits"]))
+        if connection.get("port") and connection["port"] in tuple(self.slave_port_combo["values"]):
+            self.slave_port_var.set(connection["port"])
 
     def _slave_mark_changed(self):
         self.slave_workspace.mark_changed()
@@ -1561,14 +1602,7 @@ class SlaveMixin(TableUiMixin):
         self.slave_faults = {}
         connection = data.get("connection", {})
         if isinstance(connection, dict) and not self.slave_active:
-            if str(connection.get("baud")) in [str(b) for b in DISCOVERY_BAUD_RATES]:
-                self.slave_baud_var.set(str(connection["baud"]))
-            if connection.get("parity") in SERIAL_PARITIES:
-                self.slave_parity_var.set(connection["parity"])
-            if str(connection.get("stop_bits")) in SERIAL_STOP_BITS:
-                self.slave_stop_var.set(str(connection["stop_bits"]))
-            if connection.get("port") in tuple(self.slave_port_combo["values"]):
-                self.slave_port_var.set(connection["port"])
+            self._slave_apply_connection(connection)
         faults = data.get("faults", {})
         for key, item in (faults.items() if isinstance(faults, dict) else ()):
             try:

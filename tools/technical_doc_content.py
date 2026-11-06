@@ -38,6 +38,8 @@ FILE_ORDER = [
     "mb_slave.py",
     "mb_slave_ui.py",
     "mb_table_ui.py",
+    "mb_tcp.py",
+    "mb_tcp_ui.py",
     "mb_i18n.py",
     "mb_theme.py",
     "mb_widgets.py",
@@ -45,6 +47,7 @@ FILE_ORDER = [
     "tests/test_regression.py",
     "tests/test_master.py",
     "tests/test_slave.py",
+    "tests/test_tcp.py",
     "run_tests.bat",
     "build_exe.bat",
     "MBToolkit.ico",
@@ -62,7 +65,7 @@ COVER_SUBTITLE = (
 
 COVER_NOTES = [
     "This document describes the exact source snapshot above. It does not document "
-    "proposed future features, such as Modbus TCP, that are not present in this package.",
+    "proposed future features that are not present in this package.",
     "The final appendix reproduces every Python and Windows batch source line as code "
     "screenshots. The explanatory chapters refer to the same line numbers.",
 ]
@@ -90,9 +93,37 @@ VERSION_HISTORY = [
     ("3.4", "23 October 2026",
      "Slave (simulator) tab: several simulated Slave IDs and data tables answering a real "
      "master, with fault simulation per Slave ID; window grid code shared with the Master."),
+    ("3.5", "6 November 2026",
+     "Modbus TCP Client and Server tabs: the Master and Slave windows over the network, "
+     "running alongside the serial tabs."),
 ]
 
 VERSION_CHANGES = {
+    "3.5": """
+<p>v3.5 adds Modbus TCP in two tabs of their own, <b>Client</b> and <b>Server</b>. See
+chapter "Modbus TCP: Client and Server tabs".</p>
+<ul>
+<li><b>New modules:</b> <code>mb_tcp.py</code> (MBAP framing, <code>ServerEngine</code>,
+<code>ClientEngine</code>, <code>list_ipv4_interfaces()</code>; no widgets) and
+<code>mb_tcp_ui.py</code> (<code>ClientTab</code>, <code>ServerTab</code>).</li>
+<li><b>No duplicated Modbus logic:</b> a TCP request becomes the equivalent RTU frame and
+is served by <code>handle_request()</code>; the Client builds requests with
+<code>mb_master</code> and matches responses with <code>find_master_response()</code>.</li>
+<li><b>No duplicated tab code:</b> the Client and Server are second instances of
+<code>MasterMixin</code> and <code>SlaveMixin</code> on <code>TabInstance</code>; the
+mixins gained class attributes and connection methods for the TCP tabs to override.
+<code>MasterEngine</code> gained <code>event_prefix</code> and
+<code>transact_for()</code>.</li>
+<li><b>Independent of the serial lock:</b> Client and Server run alongside the Sniffer,
+the Finder, the Master and the Slave.</li>
+<li><b>Server listening address:</b> this PC only by default, one network interface (with
+IP and adapter name) or all interfaces, with a confirmation outside 127.0.0.1.</li>
+<li>Settings <code>client</code> / <code>server</code>, workspaces in
+<code>Workspaces\\Client</code> and <code>Workspaces\\Server</code>.</li>
+<li>The regression suite grew to {tests} tests (<code>tests/test_tcp.py</code>: Client and
+Server over 127.0.0.1).</li>
+</ul>
+""",
     "3.4": """
 <p>v3.4 adds the <b>Slave</b> tab: the application answers a real master (PLC, SCADA or
 another Modbus Poll) as one or more Modbus RTU devices. See chapter "Slave (simulator)
@@ -284,9 +315,9 @@ and always documents the most recent version.</li>
 # ---------------------------------------------------------------------------
 CHAPTERS = [
     ("Architecture", """
-<p>MBToolkit uses one Tkinter root object with five behavior mixins. Protocol parsing
-and metrics are separated from the GUI, while the active Finder, Master and Slave have
-their own worker logic. This is a pragmatic modular architecture rather than a strict MVC/MVVM
+<p>MBToolkit uses one Tkinter root object with five behavior mixins, plus two tab
+objects for Modbus TCP. Protocol parsing and metrics are separated from the GUI, while the
+active Finder, Master, Slave, Client and Server have their own worker logic. This is a pragmatic modular architecture rather than a strict MVC/MVVM
 framework.</p>
 {{diagram:architecture}}
 <h2>Composition of SnifferApp</h2>
@@ -295,7 +326,11 @@ tk.Tk)</code> composes the application. <code>mb_gui.py</code> constructs and co
 the UI; the five mixins supply the Master tab, the Slave tab, active discovery, passive
 capture, and presentation/logging behavior. <code>MasterMixin</code> and
 <code>SlaveMixin</code> both inherit <code>TableUiMixin</code> from
-<code>mb_table_ui.py</code>, which holds their common window-grid widgets.</p>
+<code>mb_table_ui.py</code>, which holds their common window-grid widgets. The Modbus
+TCP tabs are <code>app.client_tab</code> and <code>app.server_tab</code>: instances of
+<code>ClientTab(MasterMixin, TabInstance)</code> and
+<code>ServerTab(SlaveMixin, TabInstance)</code> that keep their own state and look up
+everything else on the application.</p>
 <h2>Important architectural boundaries</h2>
 <ul>
 <li><b>Protocol vs UI:</b> CRC, frame recognition, parsing and SessionMetrics are in
@@ -676,6 +711,72 @@ confirmation that no real device uses the simulated IDs; while listening, the gl
 flag locks Sniffer, Simulation, Finder and Master. Windows and USB adapters usually add a
 few milliseconds to every response.</div>
 """),
+    ("Modbus TCP: Client and Server tabs", """
+{{figure:client}}
+{{figure:server}}
+{{diagram:tcp_flow}}
+<p>Modbus TCP carries the same PDU as Modbus RTU (function code and data) inside a
+7-byte MBAP header instead of the Slave ID and CRC: Transaction ID, Protocol ID (0),
+Length and Unit ID. The Client and Server tabs are the Master and Slave tabs over that
+transport, in tabs of their own so they can run at the same time as the serial tabs.</p>
+<h2>One Modbus core, two envelopes</h2>
+<p><code>rtu_to_adu()</code> and <code>adu_to_rtu()</code> convert between an RTU frame and
+an MBAP ADU (the Unit ID becomes the Slave byte, the CRC is computed). The Server turns each
+request into the equivalent RTU frame and answers it with <code>handle_request()</code>, the
+same function as the serial Slave; the Client builds its requests with
+<code>mb_master</code> and checks each response with <code>find_master_response()</code>.
+Function codes, exceptions, data formats and limits are therefore exactly those of the
+RTU tabs.</p>
+<h2>Server engine</h2>
+<ul>
+<li>One thread serves the listening socket and up to <code>SERVER_MAX_CLIENTS</code>
+connections with <code>selectors</code>; each connection has its own receive buffer. On
+Windows the port is bound with <code>SO_EXCLUSIVEADDRUSE</code>, so a port in use is
+reported instead of shared.</li>
+<li><code>adu_length()</code> reads the Length field; an impossible length closes the
+connection (the stream is out of step), a Protocol ID other than 0 is ignored.</li>
+<li>A Unit ID that is not simulated gets Exception 0B (Gateway Target Device Failed to
+Respond). Faults per Unit ID apply as on RTU, except that the corrupted response carries
+Protocol ID 1 (there is no CRC) and a delay is scheduled, so other clients are still
+served meanwhile.</li>
+<li>Events: <code>server_ready</code>, <code>server_client</code> (connected count),
+<code>server_request</code> (same shape as <code>slave_request</code>, plus the peer) and
+<code>server_stopped</code>.</li>
+</ul>
+<h2>Client engine</h2>
+<ul>
+<li><code>ClientEngine</code> subclasses <code>MasterEngine</code>: the same scheduler
+(writes, read once, earliest due window) with <code>event_prefix="client"</code>; only
+<code>transact_for(window_id, request)</code> is replaced.</li>
+<li>Each window names its device (<code>ClientPollDefinition.host</code> /
+<code>port</code>). One TCP connection per device is opened on first use, kept open and
+reopened after a failure, at most once per <code>CLIENT_RETRY_SECONDS</code>; an
+unreachable device gives <code>no_connection</code>, shown as "Sem ligação".</li>
+<li>Responses are matched by Transaction ID; a late answer to an earlier request is
+skipped. The Unit ID may be 0&ndash;255 and is never a broadcast in Modbus TCP.</li>
+</ul>
+<h2>Tab objects</h2>
+<p><code>TabInstance</code> stores the attributes a tab sets (windows, engine, widgets,
+<code>busy</code>) on the instance and forwards every other lookup (<code>tr</code>,
+<code>after</code>, <code>event_queue</code>, settings, theme) to the application. Class
+attributes such as <code>_master_tab_name</code>, <code>_master_settings_key</code>,
+<code>_master_ws_folder</code> and <code>_master_id_label</code> (and their
+<code>_slave_*</code> counterparts) describe each tab; the TCP tabs override them and the
+connection methods (<code>_master_build_connection</code>,
+<code>_master_build_target</code>, <code>master_connect</code>,
+<code>_slave_build_connection</code>, <code>slave_connect</code>, ...). Top-level windows
+and menus use <code>_table_root()</code> as parent. <code>process_queue()</code> routes
+<code>client_*</code> and <code>server_*</code> events to the two tab objects.</p>
+<h2>Listening address</h2>
+<p>"Escutar em" offers <code>127.0.0.1</code> (default), each IPv4 interface of the PC
+from <code>list_ipv4_interfaces()</code> (a hidden PowerShell
+<code>Get-NetIPAddress</code> with UTF-8 output, run in a thread; link-local addresses
+last) and <code>0.0.0.0</code>. Listening anywhere other than 127.0.0.1 requires the
+confirmation that the Server may be reachable on that network.</p>
+<div class="callout warn"><b>Network safety.</b> A Server on a network interface answers,
+and accepts writes from, any device of that network. The default keeps it on this PC; the
+choice of interface and the confirmation are explicit.</div>
+"""),
     ("UI, language and theme design", """
 {{diagram:lifecycle}}
 <h2>Canonical-language strategy</h2>
@@ -735,11 +836,12 @@ prevents the GUI from growing indefinitely while keeping the capture log complet
 BOUNDARIES_CHAPTER = ("Known boundaries and extension points", """
 <h2>What the current v{version} does not implement</h2>
 <ul>
-<li>No Modbus TCP transport.</li>
+<li>No Modbus TCP traffic capture (Sniffer) or device scan (Bus Slave Finder): both remain
+RTU only.</li>
 <li>Master tab: no data logging, conditional colours, charts, Test Center, FC22/23 or
 OLE-style automation.</li>
-<li>Slave tab: no FC08/FC22/FC23/FC43, no traffic view of its own and no Modbus TCP
-server.</li>
+<li>Slave and Server tabs: no FC08/FC22/FC23/FC43 and no traffic view of their own.</li>
+<li>Client and Server: no Modbus RTU over TCP, no UDP and no TCP&harr;RTU gateway.</li>
 <li>No passive Ethernet packet capture.</li>
 <li>No analog RS485 electrical measurement.</li>
 </ul>
@@ -757,8 +859,8 @@ future shared Modbus PDU core.</li>
 <li><b>Active client engine:</b> the Finder already contains robust serial
 request/write/read/timeout primitives that could inform a future general Master engine,
 but the thesis-quality design should separate those primitives from the Finder UI.</li>
-<li><b>Server simulator:</b> <code>handle_request()</code> is transport-independent;
-a Modbus TCP server would only need a new loop around it.</li>
+<li><b>Gateway:</b> the Server and the serial Master already share the Modbus core; a
+TCP&harr;RTU gateway would forward Server requests to a Master engine.</li>
 <li><b>Testing:</b> the existing hardware-independent regression suite is a strong base;
 future transport/client/server work should extend the same pattern.</li>
 </ul>
@@ -772,6 +874,9 @@ FIGURE_CAPTIONS = {
     "finder": "Current active Finder UI generated from the documented source.",
     "master": "Master tab connected to the in-memory test slave of tests/test_master.py.",
     "slave": "Slave tab answering a Master engine over the in-memory link of tests/test_slave.py.",
+    "client": "Client tab polling the Server tab of the same application on 127.0.0.1:1502; "
+              "the third window points at an unreachable device.",
+    "server": "Server tab answering the Client tab (Unit IDs 1 and 2, an automatic value).",
 }
 
 BAT_DESCRIPTIONS = {
@@ -810,7 +915,7 @@ BAT_DESCRIPTIONS = {
 DIAGRAMS = {
     "architecture": {
         "caption": "Module dependency and responsibility overview.",
-        "size": (1060, 477),
+        "size": (1060, 557),
         "max_width_pct": 100,
         "nodes": {
             "launcher": (784, 40, "MBToolkit.py\nlauncher", "launcher"),
@@ -830,6 +935,8 @@ DIAGRAMS = {
             "table_ui": (735, 437, "mb_table_ui.py\nTableUiMixin (shared)", "plain"),
             "slave_ui": (430, 437, "mb_slave_ui.py\nSlaveMixin", "plain"),
             "slave": (150, 437, "mb_slave.py\nSlaveStore + SlaveEngine", "protocol"),
+            "tcp_ui": (430, 517, "mb_tcp_ui.py\nClientTab + ServerTab", "plain"),
+            "tcp": (150, 517, "mb_tcp.py\nMBAP + Server/Client engines", "protocol"),
         },
         "edges": [
             ("launcher", "gui", {}),
@@ -846,6 +953,10 @@ DIAGRAMS = {
             ("slave_ui", "table_ui", {}),
             ("slave_ui", "slave", {}),
             ("gui", "slave_ui", {"bend": 30}),
+            ("tcp_ui", "slave_ui", {}),
+            ("tcp_ui", "tcp", {}),
+            ("tcp_ui", "master_ui", {"via": [(980, 517)]}),
+            ("tcp", "slave", {}),
             ("tests", "capture", {"dashed": True}),
             ("tests", "finder", {"dashed": True, "bend": 20}),
             ("tests", "proto", {"dashed": True, "bend": 25}),
@@ -941,6 +1052,30 @@ DIAGRAMS = {
             ("tx", "match", {}),
             ("match", "queue", {}),
             ("queue", "next", {"dashed": True, "label": "delay >= t3.5", "via": [(910, 275), (450, 275)]}),
+        ],
+    },
+    "tcp_flow": {
+        "caption": "Modbus TCP: the Client and Server reuse the RTU Modbus core.",
+        "size": (1000, 250),
+        "max_width_pct": 100,
+        "edge_color": "#475569",
+        "nodes": {
+            "client": (110, 60, "ClientEngine\nMaster scheduler", "primary"),
+            "adu": (360, 60, "rtu_to_adu()\nMBAP + PDU", "plain"),
+            "net": (600, 60, "TCP connection\nhost:port", "physical"),
+            "server": (840, 60, "ServerEngine\nselectors, clients", "primary"),
+            "rtu": (840, 190, "adu_to_rtu()\nUnit ID as Slave ID", "plain"),
+            "handle": (560, 190, "handle_request()\nSlaveStore (as RTU)", "protocol"),
+            "match": (200, 190, "find_master_response()\n(as RTU)", "protocol"),
+        },
+        "edges": [
+            ("client", "adu", {}),
+            ("adu", "net", {}),
+            ("net", "server", {}),
+            ("server", "rtu", {}),
+            ("rtu", "handle", {}),
+            ("handle", "match", {"label": "response ADU", "dashed": True}),
+            ("match", "client", {}),
         ],
     },
     "slave_flow": {
@@ -1067,6 +1202,19 @@ MODULE_INTROS = {'MBToolkit.py': '<b>Application launcher and top-level entry po
                    'saves, opens and deletes the workspace files of one tab and tracks '
                    'its open / modified state; module helpers validate workspace names '
                    'and list workspace files.',
+ 'mb_tcp.py': '<b>Modbus TCP transport.</b> MBAP framing and conversion to and from '
+              'RTU frames, ServerEngine (several clients with selectors, Unit IDs, '
+              'faults, Exception 0B), ClientEngine (the Master scheduler over one TCP '
+              'connection per device) and the list of the PC\'s IPv4 interfaces. It '
+              'contains no widgets.',
+ 'mb_tcp_ui.py': '<b>Modbus TCP Client and Server tabs.</b> ClientTab and ServerTab are '
+                 'second instances of MasterMixin and SlaveMixin on TabInstance; they '
+                 'replace the connection bar, add the device row of each Client window, '
+                 'choose the Server listening address and start the TCP engines.',
+ 'tests/test_tcp.py': '<b>Modbus TCP regression tests.</b> MBAP framing, then the real '
+                      'Client and Server engines over 127.0.0.1: reads, writes, '
+                      'exceptions, faults, several clients, unreachable devices, a port '
+                      'in use, Client windows and settings.',
  'tests/test_slave.py': '<b>Slave regression tests.</b> Requests and replies are checked '
                         'against the store, and the real Master and Slave engines talk over '
                         'an in-memory serial link, with adapter echo, foreign traffic, split '
@@ -1474,8 +1622,13 @@ DESIGN_NOTES = {'mb_protocol.py': 'Important design boundary: this module contai
                 'framing, timing, faults and echo removal around it.',
  'mb_table_ui.py': 'A pane is a plain dict of widgets and a window a model object, so the '
                    'same widget code serves MasterWindow and SlaveWindow.',
+ 'mb_tcp.py': 'Only the envelope and the sockets are TCP-specific: every request and '
+              'response goes through the same Modbus core as the RTU tabs.',
+ 'mb_tcp_ui.py': 'The tab classes contain only what differs from the serial tabs; '
+                 'everything else is inherited from MasterMixin and SlaveMixin.',
  'mb_gui.py': 'SnifferApp uses mixins to keep protocol capture, Finder, Master, Slave and '
-              'view behavior in separate files while sharing one Tk root and common state.'}
+              'view behavior in separate files while sharing one Tk root and common state; '
+              'the Client and Server are tab objects owned by it.'}
 
 # One-sentence description printed above each regression-test class table.
 TEST_CLASS_DESCRIPTIONS = {'TimingRegressionTests': 'Protects RTU timing and automatic/manual gap calculations, '
@@ -1543,5 +1696,13 @@ TEST_CLASS_DESCRIPTIONS = {'TimingRegressionTests': 'Protects RTU timing and aut
  'SlaveGeneratorTests': 'Validates automatic values, checks counter, ramp, sine, toggle '
                         'and random over time, and their workspace round trip.',
  'SlaveOpenFromTrafficTests': 'Checks which Traffic records can open a Slave window and '
-                              'with which table and area.'}
+                              'with which table and area.',
+ 'MbapFramingTests': 'Checks the MBAP header against a known ADU, the RTU conversion, '
+                     'impossible lengths and host/port validation.',
+ 'ServerClientTests': 'Runs the Client engine against the Server engine on 127.0.0.1: '
+                      'reads, writes, Exceptions 02 and 0B, events, every fault, several '
+                      'clients at once, an unreachable device and a port in use.',
+ 'ClientWindowTests': 'Protects Client workspace entries (host, port, Unit ID 0–255), the '
+                      'Unit ID in written requests and the tabs\' own settings and folders.',
+ 'TcpSettingsTests': 'Validates the client and server sections of settings.json.'}
 

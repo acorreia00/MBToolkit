@@ -2,13 +2,15 @@
 """Capture the Sniffer, Bus Slave Finder, Master and Slave UI figures for the PDF.
 
 Launches SnifferApp from a package folder, shows each main tab and saves
-``sniffer.png``, ``finder.png``, ``master.png`` and ``slave.png`` (client area
-only, no title bar) into the output folder.  Windows only (uses PIL.ImageGrab).
+``sniffer.png``, ``finder.png``, ``master.png``, ``slave.png``, ``client.png``
+and ``server.png`` (client area only, no title bar) into the output folder.  Windows only (uses PIL.ImageGrab).
 
 The Master figure is taken while connected to the in-memory test slave from
 ``tests/test_master.py`` (FakeSlaveSerial), so it shows live values without
 any hardware. For the Slave figure the Master is disconnected and the Slave
 tab answers a MasterEngine over the in-memory link of ``tests/test_slave.py``.
+The Client and Server figures show the two Modbus TCP tabs talking to each
+other on 127.0.0.1 (port 1502).
 
 The user's real settings are never read or written: APPDATA is redirected
 to a temporary folder, so the screenshots always show the default (PT-PT,
@@ -97,6 +99,37 @@ def prepare_slave_demo(app, app_dir):
     return master
 
 
+def prepare_tcp_demo(app):
+    """Server with two Unit IDs on 127.0.0.1:1502 and a Client polling it."""
+    from mb_slave import validate_generator
+
+    server, client = app.server_tab, app.client_tab
+    for window_id in list(server.slave_windows):
+        server.slave_close_window(window_id)
+    meter = server.slave_add_window({"slave": 1, "table": "holding", "address": 0, "qty": 6,
+                                     "title": "Contador", "formats": {0: "float32_ABCD"},
+                                     "names": {0: "Potência (kW)", 2: "Tensão (V)"}})
+    server.slave_add_window({"slave": 2, "table": "coils", "address": 0, "qty": 6,
+                             "title": "Disjuntores"})
+    server.slave_set_value(meter, 0, "152.4")
+    server.slave_set_value(meter, 2, "231")
+    server.slave_set_generator(meter.window_id, [3], validate_generator(
+        {"kind": "sine", "min": 40, "max": 60, "period_s": 20}))
+    server.server_port_var.set("1502")
+    server.slave_connect()
+    for window_id in list(client.master_windows):
+        client.master_close_window(window_id)
+    client.master_add_window({"slave": 1, "fc": 3, "address": 0, "qty": 6, "scan_ms": 250,
+                              "host": "127.0.0.1", "port": 1502, "fmt": "int16",
+                              "formats": {0: "float32_ABCD"},
+                              "names": {0: "Potência (kW)", 2: "Tensão (V)"}})
+    client.master_add_window({"slave": 2, "fc": 1, "address": 0, "qty": 6, "scan_ms": 500,
+                              "host": "127.0.0.1", "port": 1502})
+    client.master_add_window({"slave": 1, "fc": 3, "address": 0, "qty": 2, "scan_ms": 1000,
+                              "host": "192.168.1.250", "port": 502, "title": "Inversor 2"})
+    client.master_connect()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--app-dir", required=True, help="Folder containing MBToolkit.py (e.g. 'MBToolkit v3.1')")
@@ -136,6 +169,8 @@ def main(argv=None):
         prepare_master_demo(app, app_dir)
     if hasattr(app, "slave_page"):
         shots.append(("slave", "slave_page"))
+    if hasattr(app, "client_page"):
+        shots += [("client", "client_page"), ("server", "server_page")]
     demo = {}
 
     def grab(index=0):
@@ -148,6 +183,8 @@ def main(argv=None):
         name, page_attr = shots[index]
         if name == "slave":
             demo["master"] = prepare_slave_demo(app, app_dir)
+        elif name == "client":
+            prepare_tcp_demo(app)
         app.main_notebook.select(getattr(app, page_attr))
         app.update_idletasks()
         app.update()
@@ -163,7 +200,7 @@ def main(argv=None):
             grab(index + 1)
 
         # The Slave figure is taken while the last master write is still highlighted.
-        settle = 900 if name == "slave" else args.settle_ms
+        settle = 900 if name == "slave" else 2500 if name == "client" else args.settle_ms
         app.after(settle, capture)
 
     app.after(300, grab)

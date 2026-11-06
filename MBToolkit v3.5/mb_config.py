@@ -2,6 +2,7 @@
 """MBToolkit application configuration, constants and filesystem helpers."""
 
 import ctypes
+import ipaddress
 import json
 import os
 import shutil
@@ -11,7 +12,7 @@ from pathlib import Path
 APP_NAME = "MBToolkit"
 # Product name up to v3.2. Its settings folder is migrated on first start.
 LEGACY_APP_NAME = "MBSniffer"
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 
 # Simulação:
 #   0 = simulação inativa (o botão não aparece no GUI)
@@ -89,6 +90,13 @@ SLAVE_GENERATOR_TICK_MS = 100
 SLAVE_RESYNC_SILENCE_MS = 40.0
 SLAVE_WORKSPACE_FORMAT = "MBToolkit Slave workspace"
 SLAVE_WORKSPACE_VERSION = 1
+
+# Modbus TCP Client and Server tabs (same windows as Master and Slave).
+CLIENT_WORKSPACE_FORMAT = "MBToolkit Client workspace"
+SERVER_WORKSPACE_FORMAT = "MBToolkit Server workspace"
+TCP_DEFAULT_PORT = 502
+# The Server listens only on this PC until another interface is chosen.
+SERVER_DEFAULT_BIND = "127.0.0.1"
 
 # Sniffer burst assembly: extra wait when a burst ends with the start of a
 # recognised frame. USB-serial adapters deliver bytes in latency-timer
@@ -272,7 +280,8 @@ def load_ui_settings() -> dict:
     if data.get("language") in ("Português", "English"):
         result["language"] = data["language"]
 
-    if data.get("last_main_tab") in ("Sniffer", "Bus Slave Finder", "Master", "Slave"):
+    if data.get("last_main_tab") in ("Sniffer", "Bus Slave Finder", "Master", "Slave",
+                                     "Client", "Server"):
         result["last_main_tab"] = data["last_main_tab"]
 
     sniffer_in = data.get("sniffer")
@@ -462,7 +471,41 @@ def load_ui_settings() -> dict:
             "last_workspace": _validated_workspace_name(slave_in.get("last_workspace")),
         }
 
+    client_in = data.get("client")
+    if isinstance(client_in, dict):
+        result["client"] = {
+            "response_timeout_ms": _validated_int_string(
+                client_in.get("response_timeout_ms"),
+                MASTER_MIN_RESPONSE_TIMEOUT_MS,
+                MASTER_MAX_RESPONSE_TIMEOUT_MS,
+                MASTER_DEFAULT_RESPONSE_TIMEOUT_MS,
+            ),
+            "delay_ms": _validated_int_string(
+                client_in.get("delay_ms"),
+                MASTER_MIN_DELAY_MS,
+                MASTER_MAX_DELAY_MS,
+                MASTER_DEFAULT_DELAY_MS,
+            ),
+            "last_workspace": _validated_workspace_name(client_in.get("last_workspace")),
+        }
+
+    server_in = data.get("server")
+    if isinstance(server_in, dict):
+        result["server"] = {
+            "bind": _validated_ipv4(server_in.get("bind"), SERVER_DEFAULT_BIND),
+            "port": _validated_int_string(server_in.get("port"), 1, 65535, TCP_DEFAULT_PORT),
+            "last_workspace": _validated_workspace_name(server_in.get("last_workspace")),
+        }
+
     return result
+
+
+def _validated_ipv4(value, default):
+    """IPv4 address text remembered in settings.json, or *default*."""
+    try:
+        return str(ipaddress.IPv4Address(str(value).strip()))
+    except (ipaddress.AddressValueError, ValueError):
+        return default
 
 
 def _validated_workspace_name(value):
@@ -508,7 +551,7 @@ def get_application_directory() -> Path:
 
     - PyInstaller EXE: directory containing MBToolkit.exe.
     - Packaged Python/BAT mode: directory containing the root MBToolkit.bat.
-      The Python sources live inside the versioned child folder, e.g. ``MBToolkit v3.4``.
+      The Python sources live inside the versioned child folder, e.g. ``MBToolkit v3.5``.
     - Development Python mode: directory containing this module.
     """
     try:
@@ -555,6 +598,20 @@ def get_master_workspaces_folder() -> Path:
                     shutil.move(str(old), str(folder / old.name))
             except OSError:
                 pass
+    return folder
+
+
+def get_client_workspaces_folder() -> Path:
+    """Return/create %APPDATA%\\MBToolkit\\Workspaces\\Client (Modbus TCP Client)."""
+    folder = get_workspaces_folder() / "Client"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def get_server_workspaces_folder() -> Path:
+    """Return/create %APPDATA%\\MBToolkit\\Workspaces\\Server (Modbus TCP Server)."""
+    folder = get_workspaces_folder() / "Server"
+    folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 

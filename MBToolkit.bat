@@ -1,8 +1,8 @@
 @echo off
 setlocal EnableExtensions
-title MBToolkit 3.4
+title MBToolkit 3.5
 set "ROOT=%~dp0"
-set "APPDIR=%~dp0MBToolkit v3.4"
+set "APPDIR=%~dp0MBToolkit v3.5"
 set "SCRIPT=%APPDIR%\MBToolkit.py"
 cd /d "%APPDIR%"
 set "PYRUN="

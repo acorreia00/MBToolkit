@@ -29,6 +29,7 @@ from mb_protocol import SessionMetrics
 from mb_slave_finder import SlaveFinderMixin
 from mb_master_ui import MasterMixin
 from mb_slave_ui import SlaveMixin
+from mb_tcp_ui import ClientTab, ServerTab
 from mb_capture import CaptureMixin
 from mb_view import TRAFFIC_MENU_OPEN_IN_MASTER, TRAFFIC_MENU_OPEN_IN_SLAVE, ViewMixin
 from mb_widgets import RefreshButton, ToggleSwitch
@@ -326,6 +327,9 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
             self.master_apply_palette(dark)
         if hasattr(self, "slave_canvas"):
             self.slave_apply_palette(dark)
+        if hasattr(self, "client_tab"):
+            self.client_tab.master_apply_palette(dark)
+            self.server_tab.slave_apply_palette(dark)
 
     def configure_inspector_result_styles(self):
         """
@@ -565,6 +569,8 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
             self.update_discovery_estimate()
             self.master_apply_language()
             self.slave_apply_language()
+            self.client_tab.master_apply_language()
+            self.server_tab.slave_apply_language()
         except (AttributeError, tk.TclError):
             pass
 
@@ -630,7 +636,8 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
     def _restore_saved_main_tab(self):
         saved = self.ui_settings.get("last_main_tab", "Sniffer")
         pages = {"Bus Slave Finder": self.discovery_page, "Master": self.master_page,
-                 "Slave": self.slave_page}
+                 "Slave": self.slave_page, "Client": self.client_page,
+                 "Server": self.server_page}
         try:
             self.main_notebook.select(pages.get(saved, self.sniffer_page))
         except tk.TclError:
@@ -645,6 +652,10 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
                 return "Master"
             if selected == str(self.slave_page):
                 return "Slave"
+            if selected == str(self.client_page):
+                return "Client"
+            if selected == str(self.server_page):
+                return "Server"
             return "Sniffer"
         except Exception:
             return "Sniffer"
@@ -745,6 +756,8 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
                     "stop_bits": self.slave_stop_var.get(),
                     "last_workspace": self.slave_workspace.current,
                 },
+                "client": self.client_tab.settings_json(),
+                "server": self.server_tab.settings_json(),
             }
             save_ui_settings(settings=payload)
         except Exception:
@@ -1066,6 +1079,14 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
 
         self.slave_page = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.slave_page, text="Slave")
+
+        # Modbus TCP: second instances of the Master and Slave tabs.
+        self.client_page = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.client_page, text="Client")
+        self.server_page = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.server_page, text="Server")
+        self.client_tab = ClientTab(self)
+        self.server_tab = ServerTab(self)
 
         # Global Light/Dark control: root-level overlay in the top-right corner.
         # It is outside both tabs and therefore applies equally to Sniffer and
@@ -2490,13 +2511,50 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
             "último workspace do Slave também é reaberto ao arrancar.\n"
         )
 
+        h("Client e Server — Modbus TCP\n", "heading")
+        h(
+            "Os separadores Client e Server fazem o mesmo que o Master e o Slave, mas em Modbus "
+            "TCP (rede Ethernet ou Wi-Fi) em vez de RS485/RS232. As janelas, formatos, escala, "
+            "nomes, escrita, falhas, valores automáticos e workspaces funcionam da mesma forma. "
+            "Não usam a porta série, por isso podem correr ao mesmo tempo que o Sniffer, o "
+            "Finder, o Master e o Slave, e também ao mesmo tempo um do outro.\n"
+        )
+        h(
+            "Client: cada janela tem o IP e a porta TCP do equipamento (502 por defeito) e o Unit "
+            "ID (0 a 255). As janelas são servidas uma de cada vez, como no Master, com o timeout "
+            "de resposta e o atraso entre pedidos da barra de ligação. A ligação a cada "
+            "equipamento fica aberta e volta a ser feita se cair; um equipamento que não responde "
+            "à ligação aparece como “Sem ligação”. Em Modbus TCP não há broadcast: o Unit ID 0 é "
+            "um Unit ID normal. No clique direito, “Abrir no Server” cria a mesma zona no "
+            "separador Server.\n"
+        )
+        h(
+            "Server: “Escutar em” escolhe onde o Server aceita ligações: “Só este PC (127.0.0.1)” "
+            "(por defeito; só programas no mesmo PC, sem pedido da firewall), uma das interfaces "
+            "de rede do PC (com o IP e o nome da placa; o botão ↻ volta a ler a lista) ou “Todas "
+            "as interfaces (0.0.0.0)”. Numa interface de rede é preciso confirmar que o Server "
+            "pode ficar acessível nessa rede; da primeira vez, a firewall do Windows pede "
+            "autorização. Aceita vários clientes ao mesmo tempo e mostra quantos estão ligados.\n"
+        )
+        h(
+            "No Server, o Unit ID faz o papel do Slave ID (1 a 247). Um pedido para um Unit ID "
+            "que não está simulado recebe a Exception 0B (Gateway Target Device Failed to "
+            "Respond). Na simulação de falhas, o “CRC errado” do RTU passa a “Cabeçalho MBAP "
+            "inválido nas respostas”. Se a porta já estiver a ser usada por outro programa, "
+            "aparece um aviso e pode escolher-se outra porta.\n"
+        )
+        h(
+            "Os workspaces do Client e do Server ficam em %APPDATA%\\MBToolkit\\Workspaces\\Client e "
+            "\\Server, e o último de cada um é reaberto ao arrancar.\n"
+        )
+
         h("Preferências guardadas\n", "heading")
         h(
             "As preferências do utilizador são guardadas em "
             "%APPDATA%\\MBToolkit\\settings.json. Incluem Light/Dark, último separador, "
             "parâmetros série, Frame gap, Pending timeout, Auto-scroll, Separar transações, "
             "Realçar resultados, opções do Bus Slave Finder e parâmetros de ligação do "
-            "Master e do Slave. As janelas do Master e do Slave guardam-se em "
+            "Master, do Slave, do Client e do Server. As janelas guardam-se em "
             "workspaces, na pasta %APPDATA%\\MBToolkit\\Workspaces.\n"
         )
         h(
@@ -2679,6 +2737,8 @@ class SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMi
         self.build_discovery_tab(self.discovery_page)
         self.build_master_tab(self.master_page)
         self.build_slave_tab(self.slave_page)
+        self.client_tab.build_master_tab(self.client_page)
+        self.server_tab.build_slave_tab(self.server_page)
         self.update_stats_labels()
         self.update_frame_inspector(None)
 

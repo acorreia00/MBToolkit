@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# MBToolkit v3.4
+# MBToolkit v3.5
 """MBToolkit launcher."""
 
 # Simulação:

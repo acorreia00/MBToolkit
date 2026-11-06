@@ -2,7 +2,7 @@
 
 ## Versão atual
 
-**3.4**
+**3.5**
 
 Este ficheiro é a passagem de testemunho para quem desenvolve: contém **apenas
 as regras e decisões em vigor**. O histórico completo, com o detalhe e o porquê
@@ -150,6 +150,8 @@ Aplicação Windows (Tk) para diagnóstico Modbus RTU.
 
 `SnifferApp(MasterMixin, SlaveMixin, SlaveFinderMixin, CaptureMixin, ViewMixin, tk.Tk)` em
 `mb_gui.py`. `MasterMixin` e `SlaveMixin` herdam `TableUiMixin` (`mb_table_ui.py`).
+Os separadores Modbus TCP são `app.client_tab` / `app.server_tab` (`mb_tcp_ui.py`,
+secção 16).
 
 | Módulo | Responsabilidade |
 |---|---|
@@ -164,6 +166,8 @@ Aplicação Windows (Tk) para diagnóstico Modbus RTU.
 | `mb_master_ui.py` | Separador Master: janelas, escrita, workspace (`MasterMixin`). |
 | `mb_slave.py` | Slave: `SlaveStore`, `handle_request()`, `SlaveEngine`, falhas. Sem widgets. |
 | `mb_slave_ui.py` | Separador Slave: tabelas simuladas, valores, falhas, workspace (`SlaveMixin`). |
+| `mb_tcp.py` | Modbus TCP: MBAP, `ServerEngine`, `ClientEngine`, interfaces de rede. Sem widgets. |
+| `mb_tcp_ui.py` | Separadores Client e Server (`ClientTab`, `ServerTab` sobre `TabInstance`). |
 | `mb_table_ui.py` | Código comum às grelhas do Master e do Slave (`TableUiMixin`) e workspaces. |
 | `mb_i18n.py` | Traduções PT→EN, Ajuda em inglês, textos com valores. |
 | `mb_theme.py` | Tema `clam` fixo; Light/Dark só muda cores. |
@@ -484,3 +488,57 @@ Regras:
   `on_close` a seguir ao do Master.
 - Testes: `tests/test_slave.py` (handler, falhas, Master↔Slave por uma ligação
   série em memória `BusEnd`, janelas e settings).
+
+## 16. Modbus TCP: Client e Server
+
+- Separadores próprios "Client" e "Server" (decisão do utilizador), na v3.5.
+  Não usam a porta série: **não** entram no bloqueio global `busy` da
+  aplicação; cada um tem o seu `busy` e só bloqueia os próprios controlos.
+- `mb_tcp.py` (sem widgets): MBAP (`build_adu`, `adu_length`, `parse_adu`,
+  `rtu_to_adu`, `adu_to_rtu`). A lógica Modbus não é repetida: um pedido TCP é
+  convertido na trama RTU equivalente (Unit ID como Slave ID, CRC calculado) e
+  servido por `handle_request()`; o Client constrói o pedido com `mb_master` e
+  valida a resposta com `find_master_response()`.
+- `ServerEngine`: uma thread com `selectors` (socket de escuta + até 16
+  clientes), `SO_EXCLUSIVEADDRUSE` no Windows, um buffer por ligação, Length
+  impossível fecha a ligação, Protocol ID ≠ 0 é ignorado. Unit ID não simulado
+  → Exception 0B. Falhas por Unit ID: não responder, Exception, cabeçalho MBAP
+  inválido (Protocol ID 1, em vez do CRC errado) e atraso agendado (não pára os
+  outros clientes). Eventos `server_ready`, `server_client`, `server_request`,
+  `server_stopped`, `server_interfaces`.
+- `ClientEngine(MasterEngine)`: o mesmo escalonador do Master
+  (`event_prefix="client"`, hook `transact_for(window_id, request)`), uma
+  ligação TCP por (host, porta), reaberta após falha no máximo uma vez por
+  `CLIENT_RETRY_SECONDS`; respostas com Transaction ID antigo são ignoradas;
+  estado `no_connection` ("Sem ligação: …"). Unit ID 0–255 (sem broadcast):
+  `ClientPollDefinition.request()` e `ClientTab.master_build_write()` põem o
+  Unit ID no byte do Slave da trama RTU interna.
+- `mb_tcp_ui.py`: `ClientTab(MasterMixin, TabInstance)` e
+  `ServerTab(SlaveMixin, TabInstance)`. `TabInstance` (em `mb_table_ui.py`)
+  guarda o estado do separador na instância e procura o resto na aplicação
+  (`tr`, `after`, `event_queue`, tema...). Os mixins têm atributos de classe
+  `_master_*` / `_slave_*` (nome, chave das settings, página, pasta e formato
+  do workspace, etiqueta do ID, textos) e métodos que o TCP substitui:
+  `_master_build_connection`, `_master_build_target` (linha IP/Porta),
+  `_master_parse_target`, `_master_validate_definition`,
+  `_master_connection_json/_apply_connection`, `master_connect`,
+  `_master_lock_other_features`; `_slave_build_connection`,
+  `_slave_connection_json/_apply_connection`, `slave_connect`,
+  `_slave_lock_other_features`, `_slave_finish_session`, `slave_shutdown`.
+  Widgets de topo e menus usam `_table_root()` como pai (nunca a instância).
+- Eventos: `process_queue()` envia `client_*` para
+  `client_tab.handle_master_event("master_*")` e `server_*` para
+  `server_tab.handle_server_event()`.
+- Server "Escutar em": `127.0.0.1` por defeito, interfaces de
+  `list_ipv4_interfaces()` (PowerShell `Get-NetIPAddress` escondido, saída
+  UTF-8, numa thread; link-local no fim) e `0.0.0.0`. Fora do `127.0.0.1`
+  exige a confirmação. Um IP guardado que já não existe aparece como
+  "(não encontrado)".
+- Settings: `client` (timeout, atraso, `last_workspace`) e `server` (`bind`
+  IPv4 validado, `port`, `last_workspace`); `last_main_tab` aceita "Client" e
+  "Server". Workspaces em `Workspaces\Client` e `Workspaces\Server`
+  (`MBToolkit Client workspace` / `MBToolkit Server workspace`); as janelas do
+  Client guardam `host`, `port` e o Unit ID em `slave`.
+- Testes: `tests/test_tcp.py` (MBAP, Client↔Server em 127.0.0.1 com portas
+  livres, falhas, vários clientes, equipamento inacessível, porta ocupada,
+  janelas do Client, settings).
